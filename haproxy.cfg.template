@@ -23,9 +23,6 @@ global
     maxconn 8192
     ca-base /etc/ssl/certs
 
-    # Data Plane / Runtime API socket
-    stats socket /var/run/haproxy.sock mode 660 level admin
-
 defaults
     log global
     option httplog

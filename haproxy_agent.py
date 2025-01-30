@@ -2,11 +2,21 @@
 
 import asyncio
 import ipaddress
+import logging
+import os
 from typing import Any
 
 from aiohttp import web
 from haproxyspoa.payloads.ack import AckPayload
 from haproxyspoa.spoa_server import SpoaServer
+
+# Set up the logging configuration
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "WARNING")
+logging.basicConfig(level=LOG_LEVEL)
+logger = logging.getLogger(__name__)
+logger.setLevel(level=LOG_LEVEL)
+logging.getLogger("haproxyspoa").setLevel(level=LOG_LEVEL)
+logging.getLogger("aiohttp").setLevel(level=LOG_LEVEL)
 
 SPOA_AGENT = SpoaServer()
 
@@ -42,30 +52,6 @@ Example of SESSION_CACHE[session_passphrase]:
 BLACKLISTED_IPS = set()
 BLACKLISTED_SUBNETS = set()
 
-
-# Populate BLACKLISTED_IPS with 100,000 random IPs (excluding "172.17.0.1")
-# import random
-#
-# for _ in range(100000):
-#     while True:
-#         # Randomly generate a.b.c.d in [0..255], with a in [1..255] to avoid 0.x.x.x
-#         a = random.randint(1, 255)
-#         b = random.randint(0, 255)
-#         c = random.randint(0, 255)
-#         d = random.randint(0, 255)
-#
-#         random_ip = f"{a}.{b}.{c}.{d}"
-#
-#         # Skip if it's the IP you need to exclude
-#         if random_ip == "172.17.0.1":
-#             continue
-#
-#         # Add to the set
-#         BLACKLISTED_IPS.add(random_ip)
-#         # Break from the while-loop to move on to the next of the 100,000
-#         break
-
-
 ###############################################################################
 # SPOA Handlers
 ###############################################################################
@@ -74,12 +60,11 @@ BLACKLISTED_SUBNETS = set()
 @SPOA_AGENT.handler("check_client_ip")
 async def check_client_ip(ip):
     ip_str = str(ip)
-    # print(f"Incoming IP: {ip_str}", flush=True)
+    logger.debug(f"Incoming IP: {ip_str}")  # noqa
 
-    # print(BLACKLISTED_IPS, flush=True)
     # 1) Check direct IP membership in BLACKLISTED_IPS
     if ip_str in BLACKLISTED_IPS:
-        print("BANNED", flush=True)
+        logger.warning(f"IP {ip_str} is in the blacklist. BANNED.")  # noqa
         return AckPayload().set_txn_var("good", 0)
 
     # 2) Check if belongs to any blacklisted subnet
@@ -87,23 +72,23 @@ async def check_client_ip(ip):
         ip_obj = ipaddress.ip_address(ip_str)
     except ValueError:
         # If for some reason not a valid IP, mark as not good
-        print("BANNED", flush=True)
+        logger.error(f"Invalid IP address format: {ip_str}. BANNED.")  # noqa
         return AckPayload().set_txn_var("good", 0)
 
     for subnet_str in BLACKLISTED_SUBNETS:
         if ip_obj in ipaddress.ip_network(subnet_str):
-            print("BANNED", flush=True)
+            logger.warning(f"IP {ip_str} is in blacklisted subnet {subnet_str}. BANNED.")  # noqa
             return AckPayload().set_txn_var("good", 0)
 
-    # print("GOOD", flush=True)
+    logger.debug(f"IP {ip_str} is allowed. GOOD.")  # noqa
     # Otherwise it's good
     return AckPayload().set_txn_var("good", 1)
 
 
 @SPOA_AGENT.handler("exapps_msg")
 async def exapps_msg(path: str, hdrs: str):
-    print("exapps_msg triggered!", flush=True)
-    print(f"path: {path} ---- headers: {hdrs}", flush=True)
+    logger.debug("exapps_msg triggered!")
+    logger.debug(f"path: {path} ---- headers: {hdrs}")  # noqa
     return AckPayload()
 
 
@@ -214,12 +199,15 @@ async def add_ip(request: web.Request):
         raise web.HTTPBadRequest() from None
 
     BLACKLISTED_IPS.add(ip_str)
+    logger.info("Added IP %s to the blacklist.", ip_str)
     return web.HTTPNoContent()
 
 
 async def delete_ip(request: web.Request):
+    ip_str = request.match_info["ip"]
     try:
-        BLACKLISTED_IPS.remove(request.match_info["ip"])
+        BLACKLISTED_IPS.remove(ip_str)
+        logger.info("Removed IP %s from the blacklist.", ip_str)
     except KeyError:
         raise web.HTTPNotFound() from None
     return web.HTTPNoContent()
@@ -234,12 +222,15 @@ async def add_subnet(request: web.Request):
         raise web.HTTPBadRequest() from None
 
     BLACKLISTED_SUBNETS.add(cidr_str)
+    logger.info("Added subnet %s to the blacklist.", cidr_str)
     return web.HTTPNoContent()
 
 
 async def delete_subnet(request: web.Request):
+    cidr_str = request.match_info["cidr"]
     try:
-        BLACKLISTED_SUBNETS.remove(request.match_info["cidr"])
+        BLACKLISTED_SUBNETS.remove(cidr_str)
+        logger.info("Removed subnet %s from the blacklist.", cidr_str)
     except KeyError:
         raise web.HTTPNotFound() from None
     return web.HTTPNoContent()
@@ -268,8 +259,6 @@ def create_web_app() -> web.Application:
     # Blacklist routes
     app.router.add_post("/blacklist/ip/{ip}", add_ip)
     app.router.add_delete("/blacklist/ip/{ip}", delete_ip)
-
-    # Blacklist routes
     app.router.add_post("/blacklist/subnet/{cidr}", add_subnet)
     app.router.add_delete("/blacklist/subnet/{cidr}", delete_subnet)
 
@@ -281,7 +270,7 @@ async def run_http_server(host="127.0.0.1", port=8000):
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
-    print(f"HTTP server listening at {host}:{port}", flush=True)
+    logger.info("HTTP server listening at %s:%s", host, port)
     await site.start()
 
     # Keep running forever
@@ -298,7 +287,7 @@ async def main():
     spoa_task = asyncio.create_task(SPOA_AGENT._run(host="127.0.0.1", port=9600))  # noqa
     http_task = asyncio.create_task(run_http_server(host="127.0.0.1", port=8000))
 
-    print("Starting both servers: SPOA on 127.0.0.1:9600, HTTP on 127.0.0.1:8000", flush=True)
+    logger.info("Starting both servers: SPOA on 127.0.0.1:9600, HTTP on 127.0.0.1:8000")
     await asyncio.gather(spoa_task, http_task)
 
 
