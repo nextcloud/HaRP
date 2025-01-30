@@ -4,8 +4,6 @@
 # This template is processed by envsubst in start.sh to replace variables:
 #   HP_EXAPPS_ADDRESS,
 #   HP_EXAPPS_HTTPS_ADDRESS,
-#   HP_FRP_ADDRESS,
-#   HP_FRP_HTTPS_ADDRESS,
 #   HP_CONTROL_ADDRESS,
 #   HP_CONTROL_HTTPS_ADDRESS,
 #   HP_TIMEOUT_CONNECT,
@@ -38,16 +36,6 @@ userlist nextcloud_control_auth
     user app_api_harp insecure-password ${NC_HAPROXY_SHARED_KEY}
 
 ###############################################################################
-# Stats page, bound to 127.0.0.1:8404.
-###############################################################################
-listen stats
-    bind 0.0.0.0:8404
-    mode http
-    stats enable
-    stats uri /
-    stats refresh 5s
-
-###############################################################################
 # FRONTEND: ex_apps (HTTP)
 ###############################################################################
 frontend ex_apps
@@ -55,15 +43,16 @@ frontend ex_apps
     bind ${HP_EXAPPS_ADDRESS}
 
     filter spoe engine exapps-spoe config /etc/haproxy/spoe-agent.conf
+    http-request silent-drop if { var(txn.blacklist.good) -m int eq 0 }
 
-    # Track IP in bk_harp_bruteforce (sc1)
-    # http-request track-sc1 src table bk_harp_bruteforce
+    # Track IP in bk_harp_bruteforce (sc0)
+    http-request track-sc0 src table bk_harp_bruteforce
 
     # Define ACLs to check stick table conditions
-    # acl has_excessive_attempts sc1_http_req_rate gt 5
+    acl has_excessive_attempts sc0_http_req_rate gt 5
 
     # If IP has more than 5 failing attempts in 5 min, silent-drop
-    # http-request silent-drop if has_excessive_attempts
+    http-request silent-drop if has_excessive_attempts
 
     default_backend ex_apps_backend
 
@@ -78,60 +67,19 @@ _HTTPS_FRONTEND_ frontend ex_apps_https
 _HTTPS_FRONTEND_     mode http
 _HTTPS_FRONTEND_     bind ${HP_EXAPPS_HTTPS_ADDRESS} ssl crt /certs/cert.pem
 
-_HTTPS_FRONTEND_     # Track IP in bk_bruteforce (sc0) and bk_harp_bruteforce (sc1)
-_HTTPS_FRONTEND_     http-request track-sc0 src table bk_bruteforce
-_HTTPS_FRONTEND_     http-request track-sc1 src table bk_harp_bruteforce
+_HTTPS_FRONTEND_     filter spoe engine exapps-spoe config /etc/haproxy/spoe-agent.conf
+_HTTPS_FRONTEND_     http-request silent-drop if { var(txn.blacklist.good) -m int eq 0 }
 
-_HTTPS_FRONTEND_     # 1) If IP is in bk_bruteforce, silently drop
-_HTTPS_FRONTEND_     http-request silent-drop if { sc0_exists }
+_HTTPS_FRONTEND_     # Track IP in bk_harp_bruteforce (sc0)
+_HTTPS_FRONTEND_     http-request track-sc0 src table bk_harp_bruteforce
 
-_HTTPS_FRONTEND_     # 2) If IP has more than 5 failing attempts in 5 min, silent-drop
-_HTTPS_FRONTEND_     http-request silent-drop if { sc1_http_req_rate gt 5 }
+_HTTPS_FRONTEND_     # Define ACLs to check stick table conditions
+_HTTPS_FRONTEND_     acl has_excessive_attempts sc0_http_req_rate gt 5
+
+_HTTPS_FRONTEND_     # If IP has more than 5 failing attempts in 5 min, silent-drop
+_HTTPS_FRONTEND_     http-request silent-drop if has_excessive_attempts
 
 _HTTPS_FRONTEND_     default_backend ex_apps_backend
-
-###############################################################################
-# FRONTEND: FRP (TCP)
-###############################################################################
-frontend frp
-    option tcplog
-    mode tcp
-    bind ${HP_FRP_ADDRESS}
-
-    # Track IP in bk_harp_bruteforce (sc1)
-    # tcp-request connection track-sc1 src table bk_harp_bruteforce
-
-    # Define ACLs to check stick table conditions
-    # acl has_excessive_attempts sc1_http_req_rate gt 5
-
-    # If IP has more than 5 failing attempts in 5 min, silent-drop
-    # http-request silent-drop if has_excessive_attempts
-
-    default_backend frp_backend
-
-backend frp_backend
-    mode tcp
-    # The internal FRP server runs at 127.0.0.1:7100
-    server frp_server 127.0.0.1:7100
-
-###############################################################################
-# FRONTEND: frp_https (only enabled if /certs/cert.pem exists)
-###############################################################################
-_HTTPS_FRONTEND_ frontend frp_https
-_HTTPS_FRONTEND_     mode tcp
-_HTTPS_FRONTEND_     bind ${HP_FRP_HTTPS_ADDRESS} ssl crt /certs/cert.pem
-
-_HTTPS_FRONTEND_     # Track IP in bk_bruteforce (sc0) and bk_harp_bruteforce (sc1)
-_HTTPS_FRONTEND_     tcp-request connection track-sc0 src table bk_bruteforce
-_HTTPS_FRONTEND_     tcp-request connection track-sc1 src table bk_harp_bruteforce
-
-_HTTPS_FRONTEND_     # 1) If IP is in bk_bruteforce, silently drop
-_HTTPS_FRONTEND_     tcp-request connection silent-drop if { sc0_exists }
-
-_HTTPS_FRONTEND_     # 2) If IP has more than 5 failing attempts in 5 min, silent-drop
-_HTTPS_FRONTEND_     tcp-request connection silent-drop if { sc1_conn_rate gt 5 }
-
-_HTTPS_FRONTEND_     default_backend frp_backend
 
 ###############################################################################
 # FRONTEND: nextcloud_control (HTTP)
@@ -147,7 +95,7 @@ frontend nextcloud_control
     acl valid_credentials http_auth(nextcloud_control_auth)
 
     # Track IP in bk_harp_bruteforce (sc0)
-    http-request track-sc0 src table bk_harp_bruteforce  if ! valid_credentials
+    http-request track-sc0 src table bk_harp_bruteforce if ! valid_credentials
     http-request sc-inc-gpc0(0) if ! valid_credentials
 
     # Define ACLs to check stick table conditions
@@ -163,7 +111,7 @@ frontend nextcloud_control
 
 backend dataplane_backend
     mode http
-    server dataplane 127.0.0.1:8000
+    server dataplane 127.0.0.1:8200
 
 ###############################################################################
 # FRONTEND: nextcloud_control_https (only enabled if /certs/cert.pem exists)
@@ -171,20 +119,27 @@ backend dataplane_backend
 _HTTPS_FRONTEND_ frontend nextcloud_control_https
 _HTTPS_FRONTEND_     mode http
 _HTTPS_FRONTEND_     bind ${HP_CONTROL_HTTPS_ADDRESS} ssl crt /certs/cert.pem
-_HTTPS_FRONTEND_     http-request auth realm "Nextcloud Control" if !{ http_auth(nextcloud_control_users) }
 
-_HTTPS_FRONTEND_     # Track IP in bk_bruteforce (sc0) and bk_harp_bruteforce (sc1)
-_HTTPS_FRONTEND_     http-request track-sc0 src table bk_bruteforce
-_HTTPS_FRONTEND_     http-request track-sc1 src table bk_harp_bruteforce
+_HTTPS_FRONTEND_     filter spoe engine blacklist-spoe config /etc/haproxy/spoe-agent.conf
+_HTTPS_FRONTEND_     http-request silent-drop if { var(txn.blacklist.good) -m int eq 0 }
 
-_HTTPS_FRONTEND_     # 1) If IP is in bk_bruteforce, silently drop
-_HTTPS_FRONTEND_     http-request silent-drop if { sc0_exists }
+_HTTPS_FRONTEND_     # Perform Basic Auth
+_HTTPS_FRONTEND_     acl valid_credentials http_auth(nextcloud_control_auth)
 
-_HTTPS_FRONTEND_     # 2) If IP has more than 5 failing attempts in 5 min, silently drop
-_HTTPS_FRONTEND_     http-request silent-drop if { sc1_http_req_rate gt 5 }
+_HTTPS_FRONTEND_     # Track IP in bk_harp_bruteforce (sc0)
+_HTTPS_FRONTEND_     http-request track-sc0 src table bk_harp_bruteforce if ! valid_credentials
+_HTTPS_FRONTEND_     http-request sc-inc-gpc0(0) if ! valid_credentials
 
-_HTTPS_FRONTEND_     default_backend dataplane_backend
+_HTTPS_FRONTEND_     # Define ACLs to check stick table conditions
+_HTTPS_FRONTEND_     acl has_excessive_attempts sc0_http_req_rate gt 5
 
+_HTTPS_FRONTEND_     # If IP has more than 5 failing attempts in 5 min, silent-drop
+_HTTPS_FRONTEND_     http-request silent-drop if has_excessive_attempts
+
+_HTTPS_FRONTEND_     http-request auth realm NextcloudControl unless valid_credentials
+
+_HTTPS_FRONTEND_     http-request allow
+_HTTPS_FRONTEND_     use_backend dataplane_backend
 
 ###############################################################################
 # These backend is used only for global stick-table definition..
@@ -192,9 +147,8 @@ _HTTPS_FRONTEND_     default_backend dataplane_backend
 
 backend bk_harp_bruteforce
     # This table is managed by HaProxy or externally to count failing attempts.
-    # If sc1_http_req_rate (for HTTP) or sc1_conn_rate (for TCP) > 5 in 5 minutes,
-    # we drop or reject the request.
-    stick-table type ip size 1m expire 144m store gpc0,http_req_rate(5m),conn_rate(5m)
+    # If sc0_http_req_rate (for HTTP) greater then 5 in 5 minutes we drop the request.
+    stick-table type ip size 1m expire 144m store gpc0,http_req_rate(5m)
 
 
 backend agents

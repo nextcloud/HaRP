@@ -10,14 +10,11 @@
 #     -p 8782:8782 \
 #     -p 8783:8783 \
 #     -p 8784:8784 \
-#     -p 8785:8785 \
-#     -p 8404:8404 \
 #     -e HP_EXAPPS_ADDRESS="0.0.0.0:8780" \
 #     -e HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781" \
-#     -e HP_FRP_ADDRESS="0.0.0.0:8782" \
-#     -e HP_FRP_HTTPS_ADDRESS="0.0.0.0:8783" \
-#     -e HP_CONTROL_ADDRESS="0.0.0.0:8784" \
-#     -e HP_CONTROL_HTTPS_ADDRESS="0.0.0.0:8785" \
+#     -e HP_CONTROL_ADDRESS="0.0.0.0:8782" \
+#     -e HP_CONTROL_HTTPS_ADDRESS="0.0.0.0:8783" \
+#     -e HP_FRP_ADDRESS="0.0.0.0:8784" \
 #     -e NC_HAPROXY_SHARED_KEY="mysecret" \
 #     --name harp-prod \
 #     harp-prod
@@ -35,10 +32,9 @@ USER root
 # If /certs/cert.pem does not exist, HTTPS frontends are disabled automatically.
 ENV HP_EXAPPS_ADDRESS="0.0.0.0:8780" \
     HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781" \
-    HP_FRP_ADDRESS="0.0.0.0:8782" \
-    HP_FRP_HTTPS_ADDRESS="0.0.0.0:8783" \
-    HP_CONTROL_ADDRESS="0.0.0.0:8784" \
-    HP_CONTROL_HTTPS_ADDRESS="0.0.0.0:8785" \
+    HP_CONTROL_ADDRESS="0.0.0.0:8782" \
+    HP_CONTROL_HTTPS_ADDRESS="0.0.0.0:8783" \
+    HP_FRP_ADDRESS="0.0.0.0:8784" \
     HP_TIMEOUT_CONNECT="10s" \
     HP_TIMEOUT_CLIENT="30s" \
     HP_TIMEOUT_SERVER="1800s" \
@@ -66,12 +62,9 @@ RUN set -ex; \
         wget \
         tar \
         netcat-openbsd; \
-    chmod -R 777 /tmp; \
-    wget -O /tmp/dataplaneapi.apk "https://github.com/haproxytech/dataplaneapi/releases/download/v3.0.4/dataplaneapi_3.0.4_linux_amd64.apk"; \
-    apk add --no-cache --allow-untrusted /tmp/dataplaneapi.apk; \
-    rm /tmp/dataplaneapi.apk
+    chmod -R 777 /tmp;
 
-RUN pip install git+https://github.com/cloud-py-api/haproxy-python-spoa.git --break-system-packages && echo "1"
+RUN pip install git+https://github.com/cloud-py-api/haproxy-python-spoa.git --break-system-packages
 
 # Copy our scripts and templates
 COPY --chmod=755 healthcheck.sh /healthcheck.sh
