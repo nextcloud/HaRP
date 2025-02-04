@@ -1,11 +1,11 @@
 serverAddr = "127.0.0.1"
 serverPort = 8784
-metadatas.token = "mys2ecret"
+metadatas.token = "mysecret"
 
 [[proxies]]
 name = "test-tcp"
 type = "tcp"
 localIP = "127.0.0.1"
-localPort = 22
-remotePort = 6000
+localPort = 24000
+remotePort = 23000
 transport.useEncryption = true

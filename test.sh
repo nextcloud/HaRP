@@ -15,4 +15,5 @@ docker run --rm \
   -e HP_FRP_ADDRESS="0.0.0.0:8784" \
   -e NC_HAPROXY_SHARED_KEY="mysecret" \
   --name harp-prod \
+  --network host \
   harp-prod

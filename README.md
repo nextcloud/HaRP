@@ -1,18 +1,18 @@
 # Nextcloud AppAPI HaProxy Reversed Proxy (HaRP)
 
-**Note:** *Work is still in progress; the first working version is expected in March;*  
+**Note:** *Work is still in progress; the first working version is expected in March;*
 
 ---
 
 ## What is this?
 
-HaRP is a new reverse proxy system for Nextcloud 32’s AppAPI deployment workflow.  
+HaRP is a new reverse proxy system for Nextcloud 32’s AppAPI deployment workflow.
 
 It aims to simplify the process of launching ExApps (external applications) and provide faster communication by allowing requests to bypass the Nextcloud instance directly to ExApps!
 
 ## What does it do?
 
-Previously, AppAPI primarily used [DockerSocketProxy](https://github.com/nextcloud/docker-socket-proxy).  
+Previously, AppAPI primarily used [DockerSocketProxy](https://github.com/nextcloud/docker-socket-proxy).
 
 When deploying ExApps on a remote host, the **setup could become quite complex** for people unfamiliar with networking and proxies.
 
@@ -22,10 +22,10 @@ We provide a **HaRP** container that you can run locally or on any remote machin
 
 ### Features of HaRP
 
-- **Supports HTTP/1.1, HTTP/2, WebSockets, and QUIC**  
-- **Remote deployment** options (run the container anywhere)  
-- **High-speed data** transfer between client and ExApp  
-- **Brute-force protection** on all exposed interfaces  
+- **Supports HTTP and WebSockets**
+- **Remote deployment** options (run the container anywhere)
+- **High-speed data** transfer between client and ExApp
+- **Brute-force protection** on all exposed interfaces
 - **Single HaRP** can manage multiple Docker engines
 
 ---
@@ -59,13 +59,13 @@ docker run -d \
 ```
 
 In this configuration:
-- **No TLS certificates** are needed.  
-- Only ports **8780** (for ExApps HTTP), **8782** (FRP TCP), and **8784** (Nextcloud control interface) are exposed.  
-- Requests will come in via HTTP.  
+- **No TLS certificates** are needed.
+- Only ports **8780** (for ExApps HTTP), **8782** (FRP TCP), and **8784** (Nextcloud control interface) are exposed.
+- Requests will come in via HTTP.
 
 ### 3. **Optionally mount TLS certificates** to enable HTTPS
 
-If you mount your TLS certificate at `/certs/cert.pem` inside the container, the HTTPS frontends will be automatically enabled.  
+If you mount your TLS certificate at `/certs/cert.pem` inside the container, the HTTPS frontends will be automatically enabled.
 If `cert.pem` is missing, the HTTPS frontends will be automatically disabled.
 
 #### **Run the container (HTTPS-only example)**
@@ -89,30 +89,30 @@ In this configuration:
 - **Mount** the directory containing your certificate (`cert.pem`) at `/certs`.
 - Only the HTTPS ports (8781, 8783, 8785) are exposed.
 
-**Note:** **Using both HTTP and HTTPS simultaneously**  
+**Note:** **Using both HTTP and HTTPS simultaneously**
 You can also **mix and match**. For example, if you only want HTTPS for FRP but plain HTTP for ExApps, then configure:
-- `HP_EXAPPS_ADDRESS` (for HTTP)  
-- `HP_FRP_HTTPS_ADDRESS` (for HTTPS)  
+- `HP_EXAPPS_ADDRESS` (for HTTP)
+- `HP_FRP_HTTPS_ADDRESS` (for HTTPS)
 …and so forth, depending on your desired setup.
 
 ---
 
 ## Environment Variables
 
-- **`HP_EXAPPS_ADDRESS`** / **`HP_EXAPPS_HTTPS_ADDRESS`**:  
-  IP:Port for ExApps HTTP/HTTPS. **Should be reachable by your reverse proxy** (e.g., Nginx or Caddy).  
+- **`HP_EXAPPS_ADDRESS`** / **`HP_EXAPPS_HTTPS_ADDRESS`**:
+  IP:Port for ExApps HTTP/HTTPS. **Should be reachable by your reverse proxy** (e.g., Nginx or Caddy).
   e.g., `HP_EXAPPS_ADDRESS="0.0.0.0:8780"` or `HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781"`
 
-- **`HP_FRP_ADDRESS`** / **`HP_FRP_HTTPS_ADDRESS`**:  
+- **`HP_FRP_ADDRESS`** / **`HP_FRP_HTTPS_ADDRESS`**:
   IP:Port for FRP (TCP) frontends. **Should be reachable from where your ExApps are running.**
 
-- **`HP_CONTROL_ADDRESS`** / **`HP_CONTROL_HTTPS_ADDRESS`**:  
+- **`HP_CONTROL_ADDRESS`** / **`HP_CONTROL_HTTPS_ADDRESS`**:
   IP:Port for the control interface. **Should be reachable by your Nextcloud instance.**
 
-- **`NC_HAPROXY_SHARED_KEY`**:  
+- **`NC_HAPROXY_SHARED_KEY`**:
   A token used for authentication in the internal service. You can also specify `NC_HAPROXY_SHARED_KEY_FILE` if you prefer to read the key from a file.
 
-- **`NC_INSTANCE_URL`**:  
+- **`NC_INSTANCE_URL`**:
   The base URL of your Nextcloud instance. **This must be a URL reachable by the HaRP container.**
 
 ---
@@ -135,6 +135,6 @@ You can also **mix and match**. For example, if you only want HTTPS for FRP but 
 
 ## Todo
 
-- Detailed integration with Nextcloud 32 (finalization of AppAPI interfaces)  
-- Documentation for HTTPS/TLS termination setup  
+- Detailed integration with Nextcloud 32 (finalization of AppAPI interfaces)
+- Documentation for HTTPS/TLS termination setup
 - Production-ready recommendations for scaling

@@ -1,11 +1,13 @@
 """An agent for HaProxy that takes care of most of the authentication logic of AppAPI"""
 
 import asyncio
-import contextlib
 import ipaddress
 import logging
+import base64
 import os
+import re
 import time
+from ipaddress import IPv4Address, IPv6Address
 from typing import Any
 
 from aiohttp import web
@@ -13,9 +15,10 @@ from haproxyspoa.payloads.ack import AckPayload
 from haproxyspoa.spoa_server import SpoaServer
 
 
+APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
 SHARED_KEY = os.environ.get("NC_HAPROXY_SHARED_KEY")
 # Set up the logging configuration
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "DEBUG")
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 logger.setLevel(level=LOG_LEVEL)
@@ -28,6 +31,7 @@ SPOA_AGENT = SpoaServer()
 # In-memory caches
 ###############################################################################
 
+EXAPP_CACHE_LOCK = asyncio.Lock()
 EXAPP_CACHE: dict[str, dict[str, Any]] = {}
 """
 Example of EXAPP_CACHE[app_id]:
@@ -45,6 +49,7 @@ Example of EXAPP_CACHE[app_id]:
 }
 """
 
+SESSION_CACHE_LOCK = asyncio.Lock()
 SESSION_CACHE: dict[str, dict[str, str]] = {}
 """
 Example of SESSION_CACHE[session_passphrase]:
@@ -54,100 +59,159 @@ Example of SESSION_CACHE[session_passphrase]:
 }
 """
 
-BLACKLISTED_IPS = set()
-BLACKLISTED_SUBNETS = set()
-
-# Special FRP banning (temporary) structures
-FRP_FAILED_ATTEMPTS = {}  # ip_str -> list of timestamps of failures
-FRP_TEMP_BANS = {}        # ip_str -> ban_expiry_timestamp
-
-BAN_THRESHOLD = 5   # 5 invalid attempts
-BAN_WINDOW = 300    # 5 minutes in seconds
-BAN_DURATION = 300  # ban for 5 minutes once threshold is reached
+BLACKLIST_CACHE_LOCK = asyncio.Lock()
+BLACKLIST_CACHE: dict[str, list[float]] = {}  # ip_str -> list of timestamps of failures
+BLACKLIST_REQUEST_WINDOW = 300  # 5 minutes in seconds
+BLACKLIST_MAX_FAILS_COUNT = 5  # 5 invalid attempts during BLACKLIST_REQUEST_WINDOW
 
 
-def record_frp_failure(ip_str: str):
-    """Record a failed FRP login attempt for this IP and possibly ban the IP temporarily."""
+###############################################################################
+# BLACKLIST CACHE functions
+###############################################################################
+
+async def record_ip_failure(ip_address: str | IPv4Address | IPv6Address) -> None:
+    """Record a failed request attempt for this IP using BLACKLIST_CACHE."""
+    ip_str = str(ip_address)
     now = time.time()
-    # Clean out old attempts
-    attempts = FRP_FAILED_ATTEMPTS.setdefault(ip_str, [])
-    attempts = [ts for ts in attempts if now - ts < BAN_WINDOW]
-    attempts.append(now)
-    FRP_FAILED_ATTEMPTS[ip_str] = attempts
-
-    if len(attempts) >= BAN_THRESHOLD:
-        # Ban the IP for BAN_DURATION
-        FRP_TEMP_BANS[ip_str] = now + BAN_DURATION
-        logger.warning(f"FRP special ban triggered for IP {ip_str} (5+ invalid attempts in 5 min).")
+    async with BLACKLIST_CACHE_LOCK:
+        attempts = BLACKLIST_CACHE.get(ip_str, [])
+        # Purge attempts that are older than the allowed window.
+        attempts = [ts for ts in attempts if now - ts < BLACKLIST_REQUEST_WINDOW]
+        attempts.append(now)
+        BLACKLIST_CACHE[ip_str] = attempts
+        logger.debug("Recorded failure for IP %s. Failures in window: %d", ip_str, len(attempts))
 
 
-def is_temp_banned(ip_str: str) -> bool:
-    """Return True if IP is currently in the temporary FRP ban list (has not expired)."""
-    expiry = FRP_TEMP_BANS.get(ip_str)
-    if expiry is None:
-        return False
-    if time.time() >= expiry:
-        del FRP_TEMP_BANS[ip_str]
-        return False
-    return True
+async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
+    """Return True if IP has exceeded the maximum allowed failures in the request window."""
+    ip_str = str(ip_address)
+    now = time.time()
+    async with BLACKLIST_CACHE_LOCK:
+        attempts = BLACKLIST_CACHE.get(ip_str, [])
+        # Purge expired attempts.
+        attempts = [ts for ts in attempts if now - ts < BLACKLIST_REQUEST_WINDOW]
+        BLACKLIST_CACHE[ip_str] = attempts
+        if len(attempts) >= BLACKLIST_MAX_FAILS_COUNT:
+            return True
+    return False
 
 
 ###############################################################################
 # SPOA Handlers
 ###############################################################################
 
-
-@SPOA_AGENT.handler("check_client_ip")
-async def check_client_ip(ip):
-    ip_str = str(ip)
-    logger.debug(f"Incoming IP: {ip_str}")  # noqa
-
-    # 1) Check special FRP ban
-    if is_temp_banned(ip_str):
-        logger.warning(f"IP {ip_str} is temporarily banned due to FRP invalid attempts. BANNED.")
+@SPOA_AGENT.handler("exapps_msg")
+async def exapps_msg(path: str, headers: str, client_ip):
+    logger.debug("Incoming request to ExApp: path=%s, headers=%s, ip=%s", path, headers, client_ip)
+    match = APPID_PATTERN.search(path)
+    if not match:
+        logger.error("Invalid request path, cannot find AppID: %s", path)
+        await record_ip_failure(client_ip)
         return AckPayload().set_txn_var("good", 0)
 
-    # 2) Check direct IP membership in BLACKLISTED_IPS
-    if ip_str in BLACKLISTED_IPS:
-        logger.warning(f"IP {ip_str} is in the blacklist. BANNED.")  # noqa
+    exapp_id = match.group(1)
+    async with EXAPP_CACHE_LOCK:
+        record = EXAPP_CACHE.get(exapp_id.lower())
+        if record is None:
+            # In a real implementation, you would query Nextcloud and update the cache.
+            # For now, we simply imitate that the ExApp exists:
+            record = {"app_api_token": "12345", "port": 23000, "routes": [{"url": ".*", "access_level": "PUBLIC"}]}
+
+    if not record:
+        logger.error("No such ExApp enabled: %s", exapp_id)
+        await record_ip_failure(client_ip)
         return AckPayload().set_txn_var("good", 0)
 
-    # 3) Check if belongs to any blacklisted subnet
-    try:
-        ip_obj = ipaddress.ip_address(ip_str)
-    except ValueError:
-        # If for some reason not a valid IP, mark as not good
-        logger.error(f"Invalid IP address format: {ip_str}. BANNED.")  # noqa
+    target_path = path.removeprefix(f"/exapps/{exapp_id}")
+    target_port = record["port"]
+    logger.debug("Rerouting request to %s:%s", target_path, target_port)
+
+    reply = AckPayload()
+    reply = reply.set_txn_var("good", 1)
+    reply = reply.set_txn_var("target_port", target_port)
+    reply = reply.set_txn_var("target_path", target_path)
+    return reply
+
+
+@SPOA_AGENT.handler("basic_auth_msg")
+async def basic_auth_msg(headers: str, client_ip):
+    logger.debug("Received headers: %s, from IP: %s", headers, client_ip)
+    auth_ok = False
+
+    # Parse the headers to find the Authorization header.
+    # Expecting a header like:
+    #   authorization: Basic dXNlcm5hbWU6dXNlcnBhc3M=
+    auth_line = None
+    for line in headers.splitlines():
+        if line.lower().startswith("authorization:"):
+            auth_line = line
+            break
+
+    if auth_line is None:
+        logger.error("Authorization header not found.")
+    else:
+        try:
+            # Split on the colon to extract the value.
+            _, value = auth_line.split(":", 1)
+            value = value.strip()
+            if not value.startswith("Basic "):
+                logger.error("Authorization header does not use Basic authentication.")
+            else:
+                # Extract the base64 encoded part.
+                encoded_credentials = value[6:].strip()
+                # Decode the base64 encoded credentials.
+                decoded_bytes = base64.b64decode(encoded_credentials)
+                decoded_str = decoded_bytes.decode("utf-8")
+                # Expect format: username:password
+                if ":" not in decoded_str:
+                    logger.error("Invalid credentials format.")
+                else:
+                    username, password = decoded_str.split(":", 1)
+                    # Check if credentials match: username must be "app_api" and password must equal SHARED_KEY.
+                    if username == "app_api" and password == SHARED_KEY:
+                        auth_ok = True
+                        logger.debug("Basic auth succeeded for IP: %s", client_ip)
+                    else:
+                        logger.error("Invalid username or password provided.")
+        except Exception as e:
+            logger.error("Error processing basic auth credentials: %s", e)
+
+    if not auth_ok:
+        await record_ip_failure(client_ip)
+    return AckPayload().set_txn_var("good", auth_ok)
+
+
+@SPOA_AGENT.handler("check_client_ip_msg")
+async def check_client_ip(client_ip):
+    client_ip_str = str(client_ip)
+    # Check if the IP is banned based on failed attempts in BLACKLIST_CACHE.
+    if await is_ip_banned(client_ip_str):
+        logger.warning("IP %s is banned due to excessive failed attempts.", client_ip_str)
         return AckPayload().set_txn_var("good", 0)
 
-    for subnet_str in BLACKLISTED_SUBNETS:
-        if ip_obj in ipaddress.ip_network(subnet_str):
-            logger.warning(f"IP {ip_str} is in blacklisted subnet {subnet_str}. BANNED.")  # noqa
-            return AckPayload().set_txn_var("good", 0)
-
-    logger.debug(f"IP {ip_str} is allowed. GOOD.")  # noqa
-    # Otherwise it's good
+    logger.debug("IP %s is allowed. GOOD.", client_ip_str)
     return AckPayload().set_txn_var("good", 1)
 
 
-@SPOA_AGENT.handler("exapps_msg")
-async def exapps_msg(path: str, hdrs: str):
-    logger.debug("exapps_msg triggered!")
-    logger.debug(f"path: {path} ---- headers: {hdrs}")  # noqa
-    return AckPayload()
+###############################################################################
+# Helper functions
+###############################################################################
+
+async def nc_get_exapp(appid: str) -> dict[str, Any] | None:
+    pass
 
 
 ###############################################################################
 # ExApp routes
 ###############################################################################
 
-
 async def list_exapps(request: web.Request):
     return web.json_response(EXAPP_CACHE)
 
 
 async def get_exapp(request: web.Request):
-    record = EXAPP_CACHE.get(request.match_info["app_id"])
+    async with EXAPP_CACHE_LOCK:
+        record = EXAPP_CACHE.get(request.match_info["app_id"].lower())
     if record is None:
         raise web.HTTPNotFound()
     return web.json_response(record)
@@ -171,7 +235,6 @@ async def add_exapp(request: web.Request):
             raise web.HTTPBadRequest()
         if "access_level" not in route or route["access_level"] not in ["ADMIN", "USER", "PUBLIC"]:
             raise web.HTTPBadRequest()
-        # "bruteforce_protection" may or may not be present, but if present, must be valid
         if "bruteforce_protection" in route:
             if not isinstance(route["bruteforce_protection"], list):
                 raise web.HTTPBadRequest()
@@ -180,12 +243,14 @@ async def add_exapp(request: web.Request):
                     raise web.HTTPBadRequest()
 
     # Overwrite if already exists
-    EXAPP_CACHE[request.match_info["app_id"]] = data
+    async with EXAPP_CACHE_LOCK:
+        EXAPP_CACHE[request.match_info["app_id"].lower()] = data
     return web.HTTPNoContent()
 
 
 async def delete_exapp(request: web.Request):
-    old = EXAPP_CACHE.pop(request.match_info["app_id"], None)
+    async with EXAPP_CACHE_LOCK:
+        old = EXAPP_CACHE.pop(request.match_info["app_id"].lower(), None)
     if old is None:
         raise web.HTTPNotFound()
     return web.HTTPNoContent()
@@ -194,7 +259,6 @@ async def delete_exapp(request: web.Request):
 ###############################################################################
 # Session routes
 ###############################################################################
-
 
 async def list_sessions(request: web.Request):
     return web.json_response(SESSION_CACHE)
@@ -231,54 +295,31 @@ async def delete_session(request: web.Request):
 
 
 ###############################################################################
-# Blacklist routes (IP addresses / subnets)
+# Blacklist Cache clearance routes
 ###############################################################################
 
-
-async def add_ip(request: web.Request):
-    """Adds either an IPv4 or IPv6 single address to BLACKLISTED_IPS."""
-    ip_str = request.match_info["ip"]
+async def clear_blacklist_ip(request: web.Request):
+    """Clear the blacklist cache for a specific IP."""
+    ip = request.match_info["ip"]
     try:
-        ipaddress.ip_address(ip_str)
+        ipaddress.ip_address(ip)
     except ValueError:
         raise web.HTTPBadRequest() from None
 
-    BLACKLISTED_IPS.add(ip_str)
-    logger.info("Added IP %s to the blacklist.", ip_str)
-    return web.HTTPNoContent()
+    async with BLACKLIST_CACHE_LOCK:
+        if ip in BLACKLIST_CACHE:
+            del BLACKLIST_CACHE[ip]
+            logger.info("Cleared blacklist cache for IP %s", ip)
+            return web.HTTPNoContent()
+        raise web.HTTPNotFound()
 
 
-async def delete_ip(request: web.Request):
-    ip_str = request.match_info["ip"]
-    try:
-        BLACKLISTED_IPS.remove(ip_str)
-        logger.info("Removed IP %s from the blacklist.", ip_str)
-    except KeyError:
-        raise web.HTTPNotFound() from None
-    return web.HTTPNoContent()
-
-
-async def add_subnet(request: web.Request):
-    """Adds either an IPv4 or IPv6 subnet (CIDR) to BLACKLISTED_SUBNETS."""
-    cidr_str = request.match_info["cidr"]
-    try:
-        ipaddress.ip_network(cidr_str)
-    except ValueError:
-        raise web.HTTPBadRequest() from None
-
-    BLACKLISTED_SUBNETS.add(cidr_str)
-    logger.info("Added subnet %s to the blacklist.", cidr_str)
-    return web.HTTPNoContent()
-
-
-async def delete_subnet(request: web.Request):
-    cidr_str = request.match_info["cidr"]
-    try:
-        BLACKLISTED_SUBNETS.remove(cidr_str)
-        logger.info("Removed subnet %s from the blacklist.", cidr_str)
-    except KeyError:
-        raise web.HTTPNotFound() from None
-    return web.HTTPNoContent()
+async def clear_blacklist_cache(request: web.Request):
+    """Clear the entire blacklist cache."""
+    async with BLACKLIST_CACHE_LOCK:
+        BLACKLIST_CACHE.clear()
+    logger.info("Cleared entire blacklist cache.")
+    return web.Response(text="Cleared entire blacklist cache.")
 
 
 ###############################################################################
@@ -286,36 +327,32 @@ async def delete_subnet(request: web.Request):
 ###############################################################################
 
 async def frp_auth(request: web.Request):
-    if request.method != 'POST':
+    if request.method != "POST":
         raise web.HTTPBadRequest()
 
     try:
         json_data = await request.json()
-        ip_str = str(json_data["content"]["client_address"]).split(":")[0]
-        ipaddress.ip_address(ip_str)
+        client_ip = str(json_data["content"]["client_address"]).split(":")[0]
     except Exception:
         raise web.HTTPBadRequest() from None
 
-    if is_temp_banned(ip_str):
+    if await is_ip_banned(client_ip):
         return web.json_response({"reject": True, "reject_reason": "banned"})
 
-    # Just for debugging:
+    # For debugging:
     print(json_data, flush=True)
 
-    # Extract the IP address
-    with contextlib.suppress(Exception):
-        auth_token = json_data["content"]["metas"].get("token", "")
-        if auth_token == SHARED_KEY:
-            return web.json_response({"reject": False, "unchange": True})
-        record_frp_failure(ip_str)
-        raise web.HTTPBadRequest()
+    auth_token = json_data["content"]["metas"].get("token", "")
+    if auth_token == SHARED_KEY:
+        return web.json_response({"reject": False, "unchange": True})
 
+    await record_ip_failure(client_ip)
     raise web.HTTPBadRequest()
+
 
 ###############################################################################
 # HTTP Server Setup
 ###############################################################################
-
 
 def create_web_app() -> web.Application:
     app = web.Application()
@@ -332,17 +369,14 @@ def create_web_app() -> web.Application:
     app.router.add_post("/session_storage/{passphrase}", add_session)
     app.router.add_delete("/session_storage/{passphrase}", delete_session)
 
-    # Blacklist routes
-    app.router.add_post("/blacklist/ip/{ip}", add_ip)
-    app.router.add_delete("/blacklist/ip/{ip}", delete_ip)
-    app.router.add_post("/blacklist/subnet/{cidr}", add_subnet)
-    app.router.add_delete("/blacklist/subnet/{cidr}", delete_subnet)
+    # Blacklist Cache clearance routes
+    app.router.add_delete("/blacklist_cache/ip/{ip}", clear_blacklist_ip)
+    app.router.add_delete("/blacklist_cache", clear_blacklist_cache)
 
     # FRP authentication plugin
     app.router.add_post("/frp_handler", frp_auth)
 
     return app
-
 
 async def run_http_server(host="127.0.0.1", port=8200):
     app = create_web_app()
@@ -360,7 +394,6 @@ async def run_http_server(host="127.0.0.1", port=8200):
 ###############################################################################
 # Main entry point: run both SPOA & HTTP
 ###############################################################################
-
 
 async def main():
     spoa_task = asyncio.create_task(SPOA_AGENT._run(host="127.0.0.1", port=9600))  # noqa

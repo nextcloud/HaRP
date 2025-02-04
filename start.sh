@@ -68,13 +68,13 @@ bindAddr = "${FRP_HOST}"
 bindPort = ${FRP_PORT}
 transport.tls.force = true
 
-log.to = "/var/log/frps.log"
+log.to = "frps.log"
 log.level = "info"
 log.maxDays = 3
 
 maxPortsPerClient = 1
 allowPorts = [
-  { start = 23000, end = 24000 }
+  { start = 23000, end = 23999 }
 ]
 
 [[httpPlugins]]
