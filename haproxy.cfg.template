@@ -35,11 +35,9 @@ frontend ex_apps
     mode http
     bind ${HP_EXAPPS_ADDRESS}
 
-    filter spoe engine blacklist-spoe config /etc/haproxy/spoe-agent.conf
-    http-request silent-drop if { var(txn.blacklist.good) -m int eq 0 }
-
     filter spoe engine exapps-spoe config /etc/haproxy/spoe-agent.conf
-    http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.good) -m int eq 0 }
+    http-request silent-drop if { var(txn.exapps.good) -m int eq 0 }
+    http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
 
     default_backend ex_apps_backend
 
@@ -57,10 +55,8 @@ _HTTPS_FRONTEND_     mode http
 _HTTPS_FRONTEND_     bind ${HP_EXAPPS_HTTPS_ADDRESS} ssl crt /certs/cert.pem
 
 _HTTPS_FRONTEND_     filter spoe engine exapps-spoe config /etc/haproxy/spoe-agent.conf
-_HTTPS_FRONTEND_     http-request silent-drop if { var(txn.blacklist.good) -m int eq 0 }
-
-_HTTPS_FRONTEND_     filter spoe engine exapps-spoe config /etc/haproxy/spoe-agent.conf
-_HTTPS_FRONTEND_     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.good) -m int eq 0 }
+_HTTPS_FRONTEND_     http-request silent-drop if { var(txn.exapps.good) -m int eq 0 }
+_HTTPS_FRONTEND_     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
 
 _HTTPS_FRONTEND_     default_backend ex_apps_backend
 

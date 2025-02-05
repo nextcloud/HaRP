@@ -18,7 +18,7 @@ from haproxyspoa.spoa_server import SpoaServer
 APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
 SHARED_KEY = os.environ.get("NC_HAPROXY_SHARED_KEY")
 # Set up the logging configuration
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "DEBUG")
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "WARNING")
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 logger.setLevel(level=LOG_LEVEL)
@@ -102,12 +102,19 @@ async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
 
 @SPOA_AGENT.handler("exapps_msg")
 async def exapps_msg(path: str, headers: str, client_ip):
-    logger.debug("Incoming request to ExApp: path=%s, headers=%s, ip=%s", path, headers, client_ip)
+    client_ip_str = str(client_ip)
+    logger.debug("Incoming request to ExApp: path=%s, headers=%s, ip=%s", path, headers, client_ip_str)
+
+    # Check if the IP is banned based on failed attempts in BLACKLIST_CACHE.
+    if await is_ip_banned(client_ip_str):
+        logger.warning("IP %s is banned due to excessive failed attempts.", client_ip_str)
+        return AckPayload().set_txn_var("good", 0)
+
     match = APPID_PATTERN.search(path)
     if not match:
         logger.error("Invalid request path, cannot find AppID: %s", path)
-        await record_ip_failure(client_ip)
-        return AckPayload().set_txn_var("good", 0)
+        await record_ip_failure(client_ip_str)
+        return AckPayload().set_txn_var("not_found", 1)
 
     exapp_id = match.group(1)
     async with EXAPP_CACHE_LOCK:
@@ -119,15 +126,15 @@ async def exapps_msg(path: str, headers: str, client_ip):
 
     if not record:
         logger.error("No such ExApp enabled: %s", exapp_id)
-        await record_ip_failure(client_ip)
-        return AckPayload().set_txn_var("good", 0)
+        await record_ip_failure(client_ip_str)
+        return AckPayload().set_txn_var("not_found", 1)
 
     target_path = path.removeprefix(f"/exapps/{exapp_id}")
     target_port = record["port"]
     logger.debug("Rerouting request to %s:%s", target_path, target_port)
 
     reply = AckPayload()
-    reply = reply.set_txn_var("good", 1)
+    reply = reply.set_txn_var("not_found", 0)
     reply = reply.set_txn_var("target_port", target_port)
     reply = reply.set_txn_var("target_path", target_path)
     return reply
