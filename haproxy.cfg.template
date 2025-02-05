@@ -15,7 +15,7 @@
 ###############################################################################
 
 global
-    log stdout local0 debug
+    log stdout local0 ${HP_LOG_LEVEL_HAPROXY}
     maxconn 8192
     ca-base /etc/ssl/certs
 

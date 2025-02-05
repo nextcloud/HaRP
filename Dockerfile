@@ -37,12 +37,13 @@ ENV HP_EXAPPS_ADDRESS="0.0.0.0:8780" \
     HP_FRP_ADDRESS="0.0.0.0:8784" \
     HP_FRP_DISABLE_TLS="false" \
     HP_TIMEOUT_CONNECT="10s" \
-    HP_TIMEOUT_CLIENT="31s" \
+    HP_TIMEOUT_CLIENT="30s" \
     HP_TIMEOUT_SERVER="1800s" \
-    NC_INSTANCE_URL=""
+    NC_INSTANCE_URL="" \
+    HP_LOG_LEVEL="warning"
 
-# NOTE: We do NOT define NC_HAPROXY_SHARED_KEY or NC_HAPROXY_SHARED_KEY_FILE
-# here because they must be provided at runtime for security reasons.
+# NOTE: We do NOT define NC_HAPROXY_SHARED_KEY or NC_HAPROXY_SHARED_KEY_FILE here
+# because they must be provided at runtime for security reasons.
 
 RUN set -ex; \
     apk add --no-cache \
@@ -65,7 +66,9 @@ RUN set -ex; \
         netcat-openbsd; \
     chmod -R 777 /tmp;
 
-RUN pip install git+https://github.com/cloud-py-api/haproxy-python-spoa.git --break-system-packages
+# Install the Python SPOA library and JSON logger
+RUN pip install --break-system-packages \
+        git+https://github.com/cloud-py-api/haproxy-python-spoa.git
 
 # Copy our scripts and templates
 COPY --chmod=755 healthcheck.sh /healthcheck.sh

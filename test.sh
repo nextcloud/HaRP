@@ -14,6 +14,8 @@ docker run --rm \
   -e HP_CONTROL_HTTPS_ADDRESS="0.0.0.0:8783" \
   -e HP_FRP_ADDRESS="0.0.0.0:8784" \
   -e NC_HAPROXY_SHARED_KEY="mysecret" \
+  -e HP_LOG_LEVEL="error" \
+  -e HP_VERBOSE_START="1" \
   -v `pwd`/certs:/certs \
   --name harp-prod \
   harp-prod

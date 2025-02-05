@@ -156,10 +156,13 @@ HaRP is configured via several environment variables. Here are the key variables
   - **Default:** `HP_FRP_DISABLE_TLS="false"`
   - **Advanced:** Use only for specialized setups where TCP TLS termination is managed externally.
 
-- **`LOG_LEVEL`**
-  - **Description:** Set the log level for the HaProxy Python agent. Log is written to `/haproxy_agent.log` file inside container.
-  - **Default:** `WARNING`
-  - **Advanced:** Use only for developing or triaging a problem, specify the `DEBUG` or `INFO` for that.
+- **`HP_LOG_LEVEL`**
+  - **Default:** `warning`
+  - **Possible Values:** `debug`, `info`, `warning`, `error`
+
+- **`HP_VERBOSE_START`**
+  - **Description:** Flag that determines whether to output verbose logging to the console during  container startup.
+  - **Default:** `1`
 
 - **Timeout Variables:**
   - **`HP_TIMEOUT_CONNECT`**

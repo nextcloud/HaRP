@@ -18,7 +18,7 @@ from haproxyspoa.spoa_server import SpoaServer
 APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
 SHARED_KEY = os.environ.get("NC_HAPROXY_SHARED_KEY")
 # Set up the logging configuration
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "WARNING")
+LOG_LEVEL = os.environ["HP_LOG_LEVEL"].upper()
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 logger.setLevel(level=LOG_LEVEL)
@@ -162,22 +162,17 @@ async def basic_auth_msg(headers: str, client_ip):
             if not value.startswith("Basic "):
                 logger.error("Authorization header does not use Basic authentication.")
             else:
-                # Extract the base64 encoded part.
                 encoded_credentials = value[6:].strip()
-                # Decode the base64 encoded credentials.
-                decoded_bytes = base64.b64decode(encoded_credentials)
-                decoded_str = decoded_bytes.decode("utf-8")
-                # Expect format: username:password
+                decoded_str = base64.b64decode(encoded_credentials).decode("utf-8")
                 if ":" not in decoded_str:
                     logger.error("Invalid credentials format.")
                 else:
                     username, password = decoded_str.split(":", 1)
-                    # Check if credentials match: username must be "app_api" and password must equal SHARED_KEY.
                     if username == "app_api" and password == SHARED_KEY:
                         auth_ok = True
                         logger.debug("Basic auth succeeded for IP: %s", client_ip)
                     else:
-                        logger.error("Invalid username or password provided.")
+                        logger.error("Invalid username or password.")
         except Exception as e:
             logger.error("Error processing basic auth credentials: %s", e)
 
@@ -189,7 +184,6 @@ async def basic_auth_msg(headers: str, client_ip):
 @SPOA_AGENT.handler("check_client_ip_msg")
 async def check_client_ip(client_ip):
     client_ip_str = str(client_ip)
-    # Check if the IP is banned based on failed attempts in BLACKLIST_CACHE.
     if await is_ip_banned(client_ip_str):
         logger.warning("IP %s is banned due to excessive failed attempts.", client_ip_str)
         return AckPayload().set_txn_var("good", 0)
@@ -224,8 +218,6 @@ async def get_exapp(request: web.Request):
 
 async def add_exapp(request: web.Request):
     data = await request.json()
-
-    # Minimal validation
     if not isinstance(data, dict):
         raise web.HTTPBadRequest()
     if "app_api_token" not in data or not isinstance(data["app_api_token"], str):
@@ -278,8 +270,6 @@ async def get_session(request: web.Request):
 
 async def add_session(request: web.Request):
     data = await request.json()
-
-    # Minimal validation
     if not isinstance(data, dict):
         raise web.HTTPBadRequest()
     if "user_id" not in data or not isinstance(data["user_id"], str):
@@ -367,7 +357,6 @@ async def get_frp_certificates(request: web.Request):
 async def frp_auth(request: web.Request):
     if request.method != "POST":
         raise web.HTTPBadRequest()
-
     try:
         json_data = await request.json()
         client_ip = str(json_data["content"]["client_address"]).split(":")[0]
@@ -376,9 +365,6 @@ async def frp_auth(request: web.Request):
 
     if await is_ip_banned(client_ip):
         return web.json_response({"reject": True, "reject_reason": "banned"})
-
-    # For debugging:
-    print(json_data, flush=True)
 
     auth_token = json_data["content"]["metas"].get("token", "")
     if auth_token == SHARED_KEY:
@@ -407,17 +393,17 @@ def create_web_app() -> web.Application:
     app.router.add_post("/session_storage/{passphrase}", add_session)
     app.router.add_delete("/session_storage/{passphrase}", delete_session)
 
-    # Blacklist Cache clearance routes
+    # Blacklist
     app.router.add_delete("/blacklist_cache/ip/{ip}", clear_blacklist_ip)
     app.router.add_delete("/blacklist_cache", clear_blacklist_cache)
 
-    # FRP Certificates endpoint for AppAPI
+    # FRP certificates
     app.router.add_get("/frp_certificates", get_frp_certificates)
 
-    # FRP authentication plugin
+    # FRP auth
     app.router.add_post("/frp_handler", frp_auth)
-
     return app
+
 
 async def run_http_server(host="127.0.0.1", port=8200):
     app = create_web_app()
@@ -426,8 +412,6 @@ async def run_http_server(host="127.0.0.1", port=8200):
     site = web.TCPSite(runner, host, port)
     logger.info("HTTP server listening at %s:%s", host, port)
     await site.start()
-
-    # Keep running forever
     while True:
         await asyncio.sleep(3600)
 
