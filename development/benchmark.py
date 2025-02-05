@@ -6,8 +6,8 @@ import multiprocessing
 
 EXAPPS_URL = "http://127.0.0.1:8780/exapps/test/http"
 AUTH = ("app_api", "mysecret")
-PROCESSES = 50
-REQUESTS_PER_PROCESS = 1000
+PROCESSES = 2
+REQUESTS_PER_PROCESS = 10
 
 
 def worker(num_requests, url, auth):

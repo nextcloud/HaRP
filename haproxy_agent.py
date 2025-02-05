@@ -139,8 +139,6 @@ async def basic_auth_msg(headers: str, client_ip):
     auth_ok = False
 
     # Parse the headers to find the Authorization header.
-    # Expecting a header like:
-    #   authorization: Basic dXNlcm5hbWU6dXNlcnBhc3M=
     auth_line = None
     for line in headers.splitlines():
         if line.lower().startswith("authorization:"):
