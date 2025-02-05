@@ -5,7 +5,7 @@ APP = FastAPI()
 
 
 @APP.get("/http")
-def http1_endpoint():
+def http_endpoint():
     # curl http://127.0.0.1:8780/exapps/wow/http
     return {"message": "Hello from HTTP endpoint!"}
 
@@ -19,4 +19,4 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:APP", host="127.0.0.1", port=24000)
+    uvicorn.run("main:APP", host="127.0.0.1", port=24000, log_level="info")

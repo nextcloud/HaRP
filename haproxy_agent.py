@@ -323,6 +323,39 @@ async def clear_blacklist_cache(request: web.Request):
 
 
 ###############################################################################
+# Special routes for AppAPI
+###############################################################################
+
+async def get_frp_certificates(request: web.Request):
+    """
+    Returns the generated FRP TLS certificate files for the client:
+      - client.crt, ca.crt, client.key
+    If any of these files do not exist, TLS is considered disabled.
+    """
+    cert_dir = "/certs/frp"
+    client_crt_path = os.path.join(cert_dir, "client.crt")
+    ca_crt_path = os.path.join(cert_dir, "ca.crt")
+    client_key_path = os.path.join(cert_dir, "client.key")
+
+    if not (os.path.exists(client_crt_path) and os.path.exists(ca_crt_path) and os.path.exists(client_key_path)):
+        return web.json_response({"tls_enabled": False})
+
+    with open(client_crt_path) as f:
+        client_crt = f.read()
+    with open(ca_crt_path) as f:
+        ca_crt = f.read()
+    with open(client_key_path) as f:
+        client_key = f.read()
+
+    return web.json_response({
+        "tls_enabled": True,
+        "ca_crt": ca_crt,
+        "client_crt": client_crt,
+        "client_key": client_key,
+    })
+
+
+###############################################################################
 # FRP Plugin Authentication
 ###############################################################################
 
@@ -372,6 +405,9 @@ def create_web_app() -> web.Application:
     # Blacklist Cache clearance routes
     app.router.add_delete("/blacklist_cache/ip/{ip}", clear_blacklist_ip)
     app.router.add_delete("/blacklist_cache", clear_blacklist_cache)
+
+    # FRP Certificates endpoint for AppAPI
+    app.router.add_get("/frp_certificates", get_frp_certificates)
 
     # FRP authentication plugin
     app.router.add_post("/frp_handler", frp_auth)

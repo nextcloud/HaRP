@@ -3,16 +3,11 @@
 import time
 import requests
 import multiprocessing
-import random
 
-ADD_BAN_URL = "http://127.0.0.1:8784/blacklist/ip/"
-EXAPPS_URL = "http://127.0.0.1:8784/exapp_storage"
-AUTH = ("app_api_harp", "mysecret")
-PROCESSES = 8
+EXAPPS_URL = "http://127.0.0.1:8780/exapps/test/http"
+AUTH = ("app_api", "mysecret")
+PROCESSES = 50
 REQUESTS_PER_PROCESS = 1000
-
-RANDOM_BAN_IPS = 1000
-WHITELIST_IP = ["172.17.0.1"]
 
 
 def worker(num_requests, url, auth):
@@ -25,7 +20,7 @@ def worker(num_requests, url, auth):
         try:
             r = session.get(url)
             # Check status and that response body is exactly "{}"
-            if r.status_code == 200 and r.text.strip() == "{}":
+            if r.status_code == 200 and r.text.strip() == '{"message":"Hello from HTTP endpoint!"}':
                 successful += 1
         except Exception as e:
             # For real benchmarks, you might want to log or ignore these
@@ -64,31 +59,4 @@ def main():
 
 
 if __name__ == "__main__":
-    print("=======================================================")
-    ban_session = requests.Session()
-    ban_session.auth = AUTH
-    start_ban_time = time.time()
-    for _ in range(RANDOM_BAN_IPS):
-        while True:
-            # Randomly generate a.b.c.d in [0..255], with a in [1..255] to avoid 0.x.x.x
-            a = random.randint(1, 255)
-            b = random.randint(0, 255)
-            c = random.randint(0, 255)
-            d = random.randint(0, 255)
-
-            random_ip = f"{a}.{b}.{c}.{d}"
-
-            # Skip if it's the IP you need to exclude
-            if random_ip in WHITELIST_IP:
-                continue
-
-            # Add to the set
-            ban_url = ADD_BAN_URL + random_ip
-            r = ban_session.post(ban_url)
-            if r.status_code != 204:
-                raise ValueError(f"Invalid response code: {r.status_code} for url: {ban_url}")
-            # Break from the while-loop to move on to the next of the 100,000
-            break
-    print(f"Time taken for ban: {time.time() - start_ban_time:.2f} seconds ({RANDOM_BAN_IPS} ban records)")
-    print("=======================================================")
     main()

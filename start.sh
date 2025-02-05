@@ -3,6 +3,7 @@ set -e
 
 # ----------------------------------------------------------------------------
 # start.sh
+#  - Generates self-signed certificates for FRP Server and FRP Clients
 #  - Generates /haproxy.cfg from haproxy.cfg.template
 #  - Reads NC_HAPROXY_SHARED_KEY or NC_HAPROXY_SHARED_KEY_FILE
 #  - Comments out HTTPS frontends if no /certs/cert.pem is found
@@ -10,7 +11,97 @@ set -e
 #  - Starts the Python SPOE agent on 127.0.0.1:9600
 #  - Launches Python SPOE HTTP Control API on 127.0.0.1:8200
 #  - Finally runs HAProxy in the foreground
+#
+#  NOTE:
+#    Certificates are generated in the /certs/frp folder - they are used only by FRP and AppAPI.
+#    If HP_FRP_NO_TLS is not set to "true", self-signed certificates will be generated:
+#      - CA key and certificate (ca.key, ca.crt)
+#      - Server key, CSR, and certificate (server.key, server.csr, server.crt)
+#      - Client key, CSR, and certificate (client.key, client.csr, client.crt)
+#    We do not generate /certs/cert.pem file, as for HaProxy it is admin task to mount generated cert if he needs it.
 # ----------------------------------------------------------------------------
+
+# Initialize FRP_HOST and FRP_PORT once to avoid parsing HP_FRP_ADDRESS multiple times.
+FRP_HOST="$(echo "$HP_FRP_ADDRESS" | cut -d':' -f1)"
+FRP_PORT="$(echo "$HP_FRP_ADDRESS" | cut -d':' -f2)"
+# ----------------------------------------------------------------------------
+
+if [ "${HP_FRP_NO_TLS}" != "true" ]; then
+    if [ ! -d "/certs/frp" ]; then
+        mkdir -p /certs/frp
+        echo "INFO: /certs/frp directory created."
+        echo "INFO: Generating self-signed certificates in /certs/frp..."
+
+        # Determine ALT_NAMES based on FRP_HOST.
+        # If FRP_HOST is 0.0.0.0, enumerate all IPv4 addresses from the network interfaces.
+        if [ "$FRP_HOST" = "0.0.0.0" ]; then
+            ALT_NAMES="DNS:localhost"
+            for ip in $(ip -o -4 addr list | awk '{print $4}' | cut -d/ -f1); do
+                ALT_NAMES="${ALT_NAMES},IP:${ip}"
+            done
+        else
+            ALT_NAMES="IP:${FRP_HOST}"
+        fi
+
+        # Write OpenSSL configuration for server to /certs/frp/server-openssl.cnf.
+        cat > /certs/frp/server-openssl.cnf <<EOF
+[ req ]
+default_bits = 2048
+default_md = sha256
+prompt = no
+distinguished_name = dn
+req_extensions = req_ext
+
+[ dn ]
+CN = harp.nc
+
+[ req_ext ]
+subjectAltName = ${ALT_NAMES}
+EOF
+
+        # Generate CA key and certificate.
+        openssl genrsa -out /certs/frp/ca.key 2048
+        openssl req -x509 -new -nodes -key /certs/frp/ca.key -subj "/CN=harp.nc" -days 5000 -out /certs/frp/ca.crt
+
+        # Generate server key and CSR.
+        openssl genrsa -out /certs/frp/server.key 2048
+        openssl req -new -sha256 -key /certs/frp/server.key -subj "/CN=harp.nc" -reqexts req_ext -config /certs/frp/server-openssl.cnf -out /certs/frp/server.csr
+
+        # Sign the server certificate with the CA.
+        openssl x509 -req -days 365 -sha256 -in /certs/frp/server.csr -CA /certs/frp/ca.crt -CAkey /certs/frp/ca.key -CAcreateserial -extfile /certs/frp/server-openssl.cnf -extensions req_ext -out /certs/frp/server.crt
+
+        # Generate client key.
+        openssl genrsa -out /certs/frp/client.key 2048
+
+        # Write OpenSSL configuration for client to /certs/frp/client-openssl.cnf.
+        cat > /certs/frp/client-openssl.cnf <<EOF
+[ req ]
+default_bits = 2048
+default_md = sha256
+prompt = no
+distinguished_name = dn
+req_extensions = req_ext
+
+[ dn ]
+CN = harp.client.nc
+
+[ req_ext ]
+subjectAltName = DNS:harp.client.nc
+EOF
+
+        # Generate client CSR.
+        openssl req -new -sha256 -key /certs/frp/client.key -subj "/CN=harp.client.nc" -config /certs/frp/client-openssl.cnf -out /certs/frp/client.csr
+
+        # Sign the client certificate with the CA.
+        openssl x509 -req -days 365 -sha256 -in /certs/frp/client.csr -CA /certs/frp/ca.crt -CAkey /certs/frp/ca.key -CAcreateserial -extfile /certs/frp/client-openssl.cnf -extensions req_ext -out /certs/frp/client.crt
+
+        echo "INFO: Certificate generation completed."
+    else
+        echo "INFO: Certificates directory already exists('/certs/frp'). Skipping FRP certs generation."
+    fi
+else
+    echo "INFO: HP_FRP_NO_TLS is set to true. Skipping certificate generation."
+fi
 
 if [ -f "/haproxy.cfg" ]; then
   echo "INFO: /haproxy.cfg already present. Skipping config generation..."
@@ -60,13 +151,13 @@ fi
 # ----------------------------------------------------------------------------
 # Prepare FRP configuration using HP_FRP_ADDRESS
 # ----------------------------------------------------------------------------
-FRP_HOST="$(echo "$HP_FRP_ADDRESS" | cut -d':' -f1)"
-FRP_PORT="$(echo "$HP_FRP_ADDRESS" | cut -d':' -f2)"
-
 cat <<EOF >/frps.toml
 bindAddr = "${FRP_HOST}"
 bindPort = ${FRP_PORT}
 transport.tls.force = true
+transport.tls.certFile = "/certs/frp/server.crt"
+transport.tls.keyFile = "/certs/frp/server.key"
+transport.tls.trustedCaFile = "/certs/frp/ca.crt"
 
 log.to = "frps.log"
 log.level = "info"
