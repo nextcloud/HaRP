@@ -1,140 +1,172 @@
 # Nextcloud AppAPI HaProxy Reversed Proxy (HaRP)
 
-**Note:** *Work is still in progress; the first working version is expected in March;*
+**Note:** *Work is still in progress*
 
 ---
 
-## What is this?
+## Overview
 
-HaRP is a new reverse proxy system for Nextcloud 32’s AppAPI deployment workflow.
+HaRP is a **reverse proxy system** designed to simplify the deployment workflow for Nextcloud 32’s AppAPI. 
 
-It aims to simplify the process of launching ExApps (external applications) and provide faster communication by allowing requests to bypass the Nextcloud instance directly to ExApps!
+It enables direct communication between clients and ExApps, bypassing the Nextcloud instance to improve performance and reduce the complexity traditionally associated with `DockerSocketProxy` setups. 
 
-## What does it do?
+HaRP provides a flexible and scalable solution for managing ExApps, supporting deployments both locally and on remote servers. 
 
-Previously, AppAPI primarily used [DockerSocketProxy](https://github.com/nextcloud/docker-socket-proxy).
+It can be installed alongside Nextcloud or on a separate host, allowing for optimized performance and security. 
 
-When deploying ExApps on a remote host, the **setup could become quite complex** for people unfamiliar with networking and proxies.
+The system supports simultaneous HTTP and HTTPS communication, enabling trusted networks to use direct HTTP access while securing external or untrusted connections via HTTPS. 
 
-With **HaRP** we aimed to simplify configuration while maintaining easy migration of current ExApps but with a new operating scheme.
-
-We provide a **HaRP** container that you can run locally or on any remote machine. In AppAPI 32, this will be introduced as a new deployment type: `docker-install-harp`.
-
-### Features of HaRP
-
-- **Supports HTTP and WebSockets**
-- **Remote deployment** options (run the container anywhere)
-- **High-speed data** transfer between client and ExApp
-- **Brute-force protection** on all exposed interfaces
-- **Single HaRP** can manage multiple Docker engines
+In addition, HaRP includes built-in brute-force protection and dynamic routing capabilities, making it well-suited for a wide range of network infrastructures, from simple home setups to large distributed environments.
 
 ---
 
-## How to Install and Run (ONLY FOR DEVELOPERS)
+## What Does HaRP Do?
 
-Below is a brief overview for developers. This process may change in future versions.
+- **Simplifies Deployment:** Replaces more complex setups (such as DockerSocketProxy) with an easy-to-use container.
+- **Direct Communication:** Routes requests directly to ExApps, bypassing the Nextcloud instance.
+- **Enhanced Security:** Uses brute-force protection and basic authentication to secure all exposed interfaces.
+- **Flexible Frontends:** Supports both HTTP and HTTPS for ExApps, control, and FRP (TCP) frontends.
+- **Multi-Docker Management:** A single HaRP instance can manage multiple Docker engines.
+- **Automated TLS for FRP:** Generates self-signed certificates for FRP communications (unless explicitly disabled).
 
-### 1. Build the Docker image (if needed):
+## How to Install It
+
+### Deploying HaRP
+
+HaRP should be deployed where your reverse proxy (NGINX, Caddy, Traefik, etc.) can reach its `HP_EXAPPS_ADDRESS`. For home installations, you may run it on your Nextcloud instance. Below are a couple of deployment examples using Docker:
+
+#### Basic Docker Deployment
 
 ```bash
-docker build -t harp-prod .
-```
-
-### 2. **Run the container (HTTP-only example)**
-
-If you want to *only* expose HTTP (no HTTPS), you can **omit** the HTTPS environment variables and port mappings. For example:
-
-```bash
-docker run -d \
+docker run \
+  -e NC_HAPROXY_SHARED_KEY="some_very_secure_password" \
+  -e NC_INSTANCE_URL="http://nextcloud.local" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
   -p 8780:8780 \
   -p 8782:8782 \
-  -p 8784:8784 \
-  -e HP_EXAPPS_ADDRESS="0.0.0.0:8780" \
-  -e HP_FRP_ADDRESS="0.0.0.0:8782" \
-  -e HP_CONTROL_ADDRESS="0.0.0.0:8784" \
-  -e NC_HAPROXY_SHARED_KEY="mysecret" \
-  -e NC_INSTANCE_URL="http://nextcloud.local" \
-  --name harp-prod \
-  harp-prod
+  -d nextcloud-appapi-dsp:harp
 ```
 
-In this configuration:
-- **No TLS certificates** are needed.
-- Only ports **8780** (for ExApps HTTP), **8782** (FRP TCP), and **8784** (Nextcloud control interface) are exposed.
-- Requests will come in via HTTP.
+> **Note:** By default, `HP_EXAPPS_ADDRESS` is set to `0.0.0.0:8780`—ensure this port is published to the desired interface (for example, host’s **127.0.0.1:8780**).
 
-### 3. **Optionally mount TLS certificates** to enable HTTPS
+#### Using Host Networking
 
-If you mount your TLS certificate at `/certs/cert.pem` inside the container, the HTTPS frontends will be automatically enabled.
-If `cert.pem` is missing, the HTTPS frontends will be automatically disabled.
-
-#### **Run the container (HTTPS-only example)**
+For even faster communication by avoiding internal network routing, you can use host networking:
 
 ```bash
-docker run -d \
-  -p 8781:8781 \
-  -p 8783:8783 \
-  -p 8785:8785 \
-  -e HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781" \
-  -e HP_FRP_HTTPS_ADDRESS="0.0.0.0:8783" \
-  -e HP_CONTROL_HTTPS_ADDRESS="0.0.0.0:8785" \
-  -e NC_HAPROXY_SHARED_KEY="mysecret" \
-  -e NC_INSTANCE_URL="https://nextcloud.local" \
-  --name harp-prod \
-  -v /path/to/mycerts:/certs \
-  harp-prod
+docker run \
+  -e NC_HAPROXY_SHARED_KEY="some_very_secure_password" \
+  -e NC_INSTANCE_URL="http://nextcloud.local" \
+  -e HP_EXAPPS_ADDRESS="192.168.2.5:8780" \
+  -e HP_CONTROL_ADDRESS="127.0.0.1:8782" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
+  --network host \
+  -d nextcloud-appapi-dsp:harp
 ```
 
-In this configuration:
-- **Mount** the directory containing your certificate (`cert.pem`) at `/certs`.
-- Only the HTTPS ports (8781, 8783, 8785) are exposed.
+> **Warning:** Do not forget to change the **NC_HAPROXY_SHARED_KEY** value to a secure one!
 
-**Note:** **Using both HTTP and HTTPS simultaneously**
-You can also **mix and match**. For example, if you only want HTTPS for FRP but plain HTTP for ExApps, then configure:
-- `HP_EXAPPS_ADDRESS` (for HTTP)
-- `HP_FRP_HTTPS_ADDRESS` (for HTTPS)
-…and so forth, depending on your desired setup.
+---
+
+## Configuring Your Reverse Proxy
+
+HaRP requires your reverse proxy to forward traffic from your public domain (e.g., `nextcloud.com/exapps/`) to the HaRP container’s `HP_EXAPPS_ADDRESS`. Below are sample configurations for NGINX, Caddy, and Traefik:
+
+### NGINX Example
+
+```nginx
+server {
+    listen 80;
+    server_name nextcloud.com;
+
+    location /exapps/ {
+        proxy_pass http://127.0.0.1:8780/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+### Caddy Example
+
+```caddyfile
+nextcloud.com {
+    reverse_proxy /exapps/* 127.0.0.1:8780
+}
+```
+
+### Traefik Example
+
+```yaml
+http:
+  routers:
+    exapps:
+      rule: "PathPrefix(`/exapps/`)"
+      service: exapps-service
+      entryPoints:
+        - web
+  services:
+    exapps-service:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8780"
+```
+
+> **Note:** Replace `127.0.0.1` with the actual IP address of your HaRP container if it is running on a different host.
 
 ---
 
 ## Environment Variables
 
-- **`HP_EXAPPS_ADDRESS`** / **`HP_EXAPPS_HTTPS_ADDRESS`**:
-  IP:Port for ExApps HTTP/HTTPS. **Should be reachable by your reverse proxy** (e.g., Nginx or Caddy).
-  e.g., `HP_EXAPPS_ADDRESS="0.0.0.0:8780"` or `HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781"`
+HaRP is configured via several environment variables. Here are the key variables and their defaults:
 
-- **`HP_FRP_ADDRESS`** / **`HP_FRP_HTTPS_ADDRESS`**:
-  IP:Port for FRP (TCP) frontends. **Should be reachable from where your ExApps are running.**
+- **`HP_EXAPPS_ADDRESS` / `HP_EXAPPS_HTTPS_ADDRESS`**
+  - **Description:** IP:Port for ExApps HTTP/HTTPS frontends.
+  - **Default:**
+    - `HP_EXAPPS_ADDRESS="0.0.0.0:8780"`
+    - `HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781"`
+  - **Note:** Must be reachable by your reverse proxy.
 
-- **`HP_CONTROL_ADDRESS`** / **`HP_CONTROL_HTTPS_ADDRESS`**:
-  IP:Port for the control interface. **Should be reachable by your Nextcloud instance.**
+- **`HP_FRP_ADDRESS`**
+  - **Description:** IP:Port for the FRP (TCP) frontends.
+  - **Default:** `HP_FRP_ADDRESS="0.0.0.0:8784"`
+  - **Note:** Should be accessible from where your ExApps are running.
 
-- **`NC_HAPROXY_SHARED_KEY`**:
-  A token used for authentication in the internal service. You can also specify `NC_HAPROXY_SHARED_KEY_FILE` if you prefer to read the key from a file.
+- **`HP_CONTROL_ADDRESS` / `HP_CONTROL_HTTPS_ADDRESS`**
+  - **Description:** IP:Port for the control interface (receives commands from Nextcloud).
+  - **Default:**
+    - `HP_CONTROL_ADDRESS="0.0.0.0:8782"`
+    - `HP_CONTROL_HTTPS_ADDRESS="0.0.0.0:8783"`
+  - **Optional:** You can omit these if you do not need direct control communication.
 
-- **`NC_INSTANCE_URL`**:
-  The base URL of your Nextcloud instance. **This must be a URL reachable by the HaRP container.**
+- **`NC_HAPROXY_SHARED_KEY`** (or **`NC_HAPROXY_SHARED_KEY_FILE`**)
+  - **Description:** A secret token used for authentication between services.
+  - **Requirement:** Must be set at runtime. Use only one of these methods.
 
----
+- **`NC_INSTANCE_URL`**
+  - **Description:** The base URL of your Nextcloud instance.
+  - **Requirement:** Must be accessible from the HaRP container.
 
-## Usage with Nextcloud AppAPI
+- **`HP_FRP_DISABLE_TLS`**
+  - **Description:** Disables TLS for the FRP service.
+  - **Default:** `HP_FRP_DISABLE_TLS="false"`
+  - **Advanced:** Use only for specialized setups where TCP TLS termination is managed externally.
 
-1. **Set up the HaRP container** using one of the examples above (HTTP-only, HTTPS-only, or mixed).
-2. **Specify the HaRP host and port configuration** in the AppAPI 32 settings (e.g., select `docker-install-harp` and fill in the relevant addresses).
-3. **Deploy your ExApps** so they connect through HaRP. Requests to ExApps will be automatically proxied and protected from brute-force attacks.
+- **Timeout Variables:**
+  - **`HP_TIMEOUT_CONNECT`**
+    - **Description:** Maximum time allowed for establishing a connection.
+    - **Default:** `10s`
+  - **`HP_TIMEOUT_CLIENT`**
+    - **Description:** Timeout for client-side connections.
+    - **Default:** `30s`
+  - **`HP_TIMEOUT_SERVER`**
+    - **Description:** Timeout for server-side connections. **We do not recommend to change this value.**
+    - **Default:** `1800s`
 
----
+## Contributing
 
-![RequestToExApp](https://www.mermaidchart.com/raw/a7557169-9c5c-4458-af73-19ffbdd97596?theme=light&version=v0.1&format=svg)
-
-![Bruteforce](https://www.mermaidchart.com/raw/69417bdf-59af-4b7a-b4e4-b818851f3278?theme=light&version=v0.1&format=svg)
-
-![ExAppSessions](https://www.mermaidchart.com/raw/d0350862-3806-4db9-8d90-b7f154600d8e?theme=light&version=v0.1&format=svg)
-
----
-
-## Todo
-
-- Detailed integration with Nextcloud 32 (finalization of AppAPI interfaces)
-- Documentation for HTTPS/TLS termination setup
-- Production-ready recommendations for scaling
+Contributions to HaRP are welcome. Feel free to open issues, discussions or submit pull requests with improvements, bug fixes, or new features.
