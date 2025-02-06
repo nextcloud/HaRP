@@ -14,11 +14,11 @@ set -e
 #
 #  NOTE:
 #    Certificates are generated in the /certs/frp folder - they are used only by FRP and AppAPI.
-#    If HP_FRP_NO_TLS is not set to "true", self-signed certificates will be generated:
+#    If HP_FRP_DISABLE_TLS is set to "false"(default), self-signed certificates will be generated:
 #      - CA key and certificate (ca.key, ca.crt)
 #      - Server key, CSR, and certificate (server.key, server.csr, server.crt)
 #      - Client key, CSR, and certificate (client.key, client.csr, client.crt)
-#    We do not generate /certs/cert.pem file, as for HaProxy it is admin task to mount generated cert if he needs it.
+#    We do not generate /certs/cert.pem file, as for HaProxy it is admin task to mount generated cert if needed.
 # ----------------------------------------------------------------------------
 
 HP_VERBOSE_START=${HP_VERBOSE_START:-1}
@@ -57,9 +57,9 @@ esac
 export HP_LOG_LEVEL_HAPROXY
 
 # ----------------------------------------------------------------------------
-# Generate self-signed certs for FRP unless HP_FRP_NO_TLS=true
+# Generate self-signed certs for FRP unless HP_FRP_DISABLE_TLS=true
 # ----------------------------------------------------------------------------
-if [ "${HP_FRP_NO_TLS}" != "true" ]; then
+if [ "${HP_FRP_DISABLE_TLS}" != "true" ]; then
     if [ ! -d "/certs/frp" ]; then
         mkdir -p /certs/frp
         log "INFO: /certs/frp directory created."
@@ -134,11 +134,9 @@ EOF
             -extfile /certs/frp/client-openssl.cnf -extensions req_ext -out /certs/frp/client.crt
 
         log "INFO: Certificate generation completed."
-    else
-        log "INFO: Certificates directory /certs/frp already exists. Skipping FRP cert generation."
     fi
 else
-    log "INFO: HP_FRP_NO_TLS is set to true. Skipping certificate generation."
+    log "INFO: HP_FRP_DISABLE_TLS is set to true. Skipping certificate generation."
 fi
 
 # ----------------------------------------------------------------------------
@@ -196,6 +194,7 @@ fi
 # ----------------------------------------------------------------------------
 # Prepare FRP configuration
 # ----------------------------------------------------------------------------
+if [ "${HP_FRP_DISABLE_TLS}" != "true" ]; then
 cat <<EOF >/frps.toml
 bindAddr = "${FRP_HOST}"
 bindPort = ${FRP_PORT}
@@ -218,6 +217,26 @@ addr = "127.0.0.1:8200"
 path = "/frp_handler"
 ops = ["Login"]
 EOF
+else
+cat <<EOF >/frps.toml
+bindAddr = "${FRP_HOST}"
+bindPort = ${FRP_PORT}
+
+log.to = "/frps.log"
+log.level = "info"
+log.maxDays = 3
+
+maxPortsPerClient = 1
+allowPorts = [
+  { start = 23000, end = 23999 }
+]
+
+[[httpPlugins]]
+addr = "127.0.0.1:8200"
+path = "/frp_handler"
+ops = ["Login"]
+EOF
+fi
 
 log "INFO: Starting Python HaProxy Agent on 127.0.0.1:8200 and 127.0.0.1:9600..."
 nohup python3 /usr/local/bin/haproxy_agent.py &
