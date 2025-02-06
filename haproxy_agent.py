@@ -36,7 +36,8 @@ EXAPP_CACHE: dict[str, dict[str, Any]] = {}
 """
 Example of EXAPP_CACHE[app_id]:
 {
-  "app_api_token": str,
+  "exapp_token": str,
+  "exapp_version": str,
   "port": int,
   "routes": [
     {
@@ -133,7 +134,12 @@ async def exapps_msg(path: str, headers: str, client_ip):
         if record is None:
             # In a real implementation, you would query Nextcloud and update the cache.
             # For now, we simply imitate that the ExApp exists:
-            record = {"app_api_token": "12345", "port": 23000, "routes": [{"url": ".*", "access_level": "PUBLIC"}]}
+            record = {
+                "exapp_token": "12345",
+                "exapp_version": "1.1.1",
+                "port": 23000,
+                "routes": [{"url": ".*", "access_level": "PUBLIC"}]
+            }
 
     if not record:
         logger.error("No such ExApp enabled: %s", exapp_id)
@@ -142,6 +148,9 @@ async def exapps_msg(path: str, headers: str, client_ip):
 
     target_path = path.removeprefix(f"/exapps/{exapp_id}")
     target_port = record["port"]
+
+    # TO-DO: here we should check if such route are allowed to be called
+
     logger.debug("Rerouting request to %s:%s", target_path, target_port)
 
     reply = AckPayload()
@@ -149,6 +158,9 @@ async def exapps_msg(path: str, headers: str, client_ip):
     reply = reply.set_txn_var("app_api", 0)
     reply = reply.set_txn_var("target_port", target_port)
     reply = reply.set_txn_var("target_path", target_path)
+    reply = reply.set_txn_var("exapp_token", record["exapp_token"])
+    reply = reply.set_txn_var("exapp_version", record["exapp_version"])
+    reply = reply.set_txn_var("exapp_id", exapp_id)
     return reply
 
 

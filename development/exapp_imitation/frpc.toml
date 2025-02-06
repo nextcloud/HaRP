@@ -1,5 +1,5 @@
 serverAddr = "127.0.0.1"
-serverPort = 8784
+serverPort = 8782
 metadatas.token = "mysecret"
 transport.tls.certFile = "../../certs/frp/client.crt"
 transport.tls.keyFile = "../../certs/frp/client.key"

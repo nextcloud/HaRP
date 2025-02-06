@@ -47,6 +47,9 @@ backend ex_apps_backend
     server frp_server 127.0.0.1
     http-request set-path %[var(txn.exapps.target_path)]
     http-request set-dst-port var(txn.exapps.target_port)
+    http-request set-header EX-APP-ID %[var(txn.exapps.exapp_id)]
+    http-request set-header EX-APP-VERSION %[var(txn.exapps.exapp_version)]
+    http-request set-header AUTHORIZATION-APP-API %[var(txn.exapps.exapp_token)]
 
 ###############################################################################
 # FRONTEND: ex_apps_https (only enabled if /certs/cert.pem exists)
