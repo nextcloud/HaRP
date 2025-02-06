@@ -60,7 +60,7 @@ RUN set -ex; \
         netcat-openbsd; \
     chmod -R 777 /tmp;
 
-# Install the Python SPOA library and JSON logger
+# Install the Python SPOA library
 RUN pip install --break-system-packages \
         git+https://github.com/cloud-py-api/haproxy-python-spoa.git
 

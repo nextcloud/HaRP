@@ -20,8 +20,8 @@ SHARED_KEY = os.environ.get("NC_HAPROXY_SHARED_KEY")
 # Set up the logging configuration
 LOG_LEVEL = os.environ["HP_LOG_LEVEL"].upper()
 logging.basicConfig(level=LOG_LEVEL)
-logger = logging.getLogger(__name__)
-logger.setLevel(level=LOG_LEVEL)
+LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(level=LOG_LEVEL)
 logging.getLogger("haproxyspoa").setLevel(level=LOG_LEVEL)
 logging.getLogger("aiohttp").setLevel(level=LOG_LEVEL)
 
@@ -80,7 +80,7 @@ async def record_ip_failure(ip_address: str | IPv4Address | IPv6Address) -> None
         attempts = [ts for ts in attempts if now - ts < BLACKLIST_REQUEST_WINDOW]
         attempts.append(now)
         BLACKLIST_CACHE[ip_str] = attempts
-        logger.debug("Recorded failure for IP %s. Failures in window: %d", ip_str, len(attempts))
+        LOGGER.debug("Recorded failure for IP %s. Failures in window: %d", ip_str, len(attempts))
 
 
 async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
@@ -104,16 +104,16 @@ async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
 @SPOA_AGENT.handler("exapps_msg")
 async def exapps_msg(path: str, headers: str, client_ip):
     client_ip_str = str(client_ip)
-    logger.debug("Incoming request to ExApp: path=%s, headers=%s, ip=%s", path, headers, client_ip_str)
+    LOGGER.debug("Incoming request to ExApp: path=%s, headers=%s, ip=%s", path, headers, client_ip_str)
 
     # Check if the IP is banned based on failed attempts in BLACKLIST_CACHE.
     if await is_ip_banned(client_ip_str):
-        logger.warning("IP %s is banned due to excessive failed attempts.", client_ip_str)
+        LOGGER.warning("IP %s is banned due to excessive failed attempts.", client_ip_str)
         return AckPayload().set_txn_var("good", 0)
 
     match = APPID_PATTERN.search(path)
     if not match:
-        logger.error("Invalid request path, cannot find AppID: %s", path)
+        LOGGER.error("Invalid request path, cannot find AppID: %s", path)
         await record_ip_failure(client_ip_str)
         return AckPayload().set_txn_var("not_found", 1)
 
@@ -132,26 +132,45 @@ async def exapps_msg(path: str, headers: str, client_ip):
     async with EXAPP_CACHE_LOCK:
         record = EXAPP_CACHE.get(exapp_id.lower())
         if record is None:
-            # In a real implementation, you would query Nextcloud and update the cache.
-            # For now, we simply imitate that the ExApp exists:
+            # TO-DO: query AppAPI endpoint for such record
             record = {
                 "exapp_token": "12345",
                 "exapp_version": "1.1.1",
                 "port": 23000,
-                "routes": [{"url": ".*", "access_level": "PUBLIC"}]
+                "routes": [
+                    {"url": "/http", "access_level": "PUBLIC"},
+                    {"url": "/ws", "access_level": "PUBLIC"}
+                ]
             }
+            #=========================================================================
+            EXAPP_CACHE[exapp_id.lower()] = record
 
     if not record:
-        logger.error("No such ExApp enabled: %s", exapp_id)
+        LOGGER.error("No such ExApp enabled: %s", exapp_id)
         await record_ip_failure(client_ip_str)
         return AckPayload().set_txn_var("not_found", 1)
 
     target_path = path.removeprefix(f"/exapps/{exapp_id}")
     target_port = record["port"]
 
-    # TO-DO: here we should check if such route are allowed to be called
+    route_allowed = False
+    for route in record.get("routes", []):
+        if route in ("/heartbeat", "/init", "/enabled"):
+            route_allowed = True  # this is internal ExApp endpoint - they are always allowed.
+            break
+        try:
+            if re.match(route["url"], target_path):
+                route_allowed = True  # TO-DO: we also need to implement access check(ADMIN, USER, PUBLIC)
+                break
+        except re.error as err:
+            LOGGER.error("Invalid regex %s in route for exapp %s: %s", route["url"], exapp_id, err)
 
-    logger.debug("Rerouting request to %s:%s", target_path, target_port)
+    if not route_allowed:
+        LOGGER.error("No defined route for handling %s", target_path)
+        await record_ip_failure(client_ip_str)
+        return AckPayload().set_txn_var("not_found", 1)
+
+    LOGGER.info("Rerouting request to %s:%s", target_path, target_port)
 
     reply = AckPayload()
     reply = reply.set_txn_var("not_found", 0)
@@ -166,10 +185,10 @@ async def exapps_msg(path: str, headers: str, client_ip):
 
 @SPOA_AGENT.handler("basic_auth_msg")
 async def basic_auth_msg(headers: str, client_ip):
-    logger.debug("Received headers: %s, from IP: %s", headers, client_ip)
+    LOGGER.debug("Received headers: %s, from IP: %s", headers, client_ip)
     auth_ok = perform_basic_auth(headers, "app_api", SHARED_KEY)
     if auth_ok:
-        logger.debug("Basic auth succeeded for IP: %s", client_ip)
+        LOGGER.debug("Basic auth succeeded for IP: %s", client_ip)
     else:
         await record_ip_failure(client_ip)
     return AckPayload().set_txn_var("good", auth_ok)
@@ -179,10 +198,10 @@ async def basic_auth_msg(headers: str, client_ip):
 async def check_client_ip(client_ip):
     client_ip_str = str(client_ip)
     if await is_ip_banned(client_ip_str):
-        logger.warning("IP %s is banned due to excessive failed attempts.", client_ip_str)
+        LOGGER.warning("IP %s is banned due to excessive failed attempts.", client_ip_str)
         return AckPayload().set_txn_var("good", 0)
 
-    logger.debug("IP %s is allowed. GOOD.", client_ip_str)
+    LOGGER.debug("IP %s is allowed. GOOD.", client_ip_str)
     return AckPayload().set_txn_var("good", 1)
 
 
@@ -199,28 +218,28 @@ def perform_basic_auth(headers: str, username: str, password: str) -> bool:
             break
 
     if auth_line is None:
-        logger.error("Authorization header not found.")
+        LOGGER.error("Authorization header not found.")
         return False
     try:
         # Split on the colon to extract the value.
         _, value = auth_line.split(":", 1)
         value = value.strip()
         if not value.startswith("Basic "):
-            logger.error("Authorization header does not use Basic authentication.")
+            LOGGER.error("Authorization header does not use Basic authentication.")
             return False
 
         encoded_credentials = value[6:].strip()
         decoded_str = base64.b64decode(encoded_credentials).decode("utf-8")
         if ":" not in decoded_str:
-            logger.error("Invalid credentials format.")
+            LOGGER.error("Invalid credentials format.")
             return False
 
         in_username, in_password = decoded_str.split(":", 1)
         if in_username == username and in_password == password:
             return True
-        logger.error("Invalid username or password.")
+        LOGGER.error("Invalid username or password.")
     except Exception as e:
-        logger.error("Error processing basic auth credentials: %s", e)
+        LOGGER.error("Error processing basic auth credentials: %s", e)
     return False
 
 
@@ -332,7 +351,7 @@ async def clear_blacklist_ip(request: web.Request):
     async with BLACKLIST_CACHE_LOCK:
         if ip in BLACKLIST_CACHE:
             del BLACKLIST_CACHE[ip]
-            logger.info("Cleared blacklist cache for IP %s", ip)
+            LOGGER.info("Cleared blacklist cache for IP %s", ip)
             return web.HTTPNoContent()
         raise web.HTTPNotFound()
 
@@ -341,7 +360,7 @@ async def clear_blacklist_cache(request: web.Request):
     """Clear the entire blacklist cache."""
     async with BLACKLIST_CACHE_LOCK:
         BLACKLIST_CACHE.clear()
-    logger.info("Cleared entire blacklist cache.")
+    LOGGER.info("Cleared entire blacklist cache.")
     return web.Response(text="Cleared entire blacklist cache.")
 
 
@@ -438,7 +457,7 @@ async def run_http_server(host="127.0.0.1", port=8200):
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
-    logger.info("HTTP server listening at %s:%s", host, port)
+    LOGGER.info("HTTP server listening at %s:%s", host, port)
     await site.start()
     while True:
         await asyncio.sleep(3600)
@@ -452,7 +471,7 @@ async def main():
     spoa_task = asyncio.create_task(SPOA_AGENT._run(host="127.0.0.1", port=9600))  # noqa
     http_task = asyncio.create_task(run_http_server(host="127.0.0.1", port=8200))
 
-    logger.info("Starting both servers: SPOA on 127.0.0.1:9600, HTTP on 127.0.0.1:8200")
+    LOGGER.info("Starting both servers: SPOA on 127.0.0.1:9600, HTTP on 127.0.0.1:8200")
     await asyncio.gather(spoa_task, http_task)
 
 
