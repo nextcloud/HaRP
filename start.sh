@@ -5,7 +5,7 @@ set -e
 # start.sh
 #  - Generates self-signed certificates for FRP Server and FRP Clients
 #  - Generates /haproxy.cfg from haproxy.cfg.template
-#  - Reads NC_HAPROXY_SHARED_KEY or NC_HAPROXY_SHARED_KEY_FILE
+#  - Reads NC_HARP_SHARED_KEY or NC_HARP_SHARED_KEY_FILE
 #  - Comments out HTTPS frontends if no /certs/cert.pem is found
 #  - Starts FRP server (frps) on HP_FRP_ADDRESS
 #  - Starts the Python SPOE agent on 127.0.0.1:9600
@@ -147,31 +147,31 @@ if [ -f "/haproxy.cfg" ]; then
 else
   log "INFO: Creating /haproxy.cfg from haproxy.cfg.template..."
 
-  if [ -n "$NC_HAPROXY_SHARED_KEY_FILE" ] && [ ! -f "$NC_HAPROXY_SHARED_KEY_FILE" ]; then
-    echo "ERROR: NC_HAPROXY_SHARED_KEY_FILE is specified but the file does not exist."
+  if [ -n "$NC_HARP_SHARED_KEY_FILE" ] && [ ! -f "$NC_HARP_SHARED_KEY_FILE" ]; then
+    echo "ERROR: NC_HARP_SHARED_KEY_FILE is specified but the file does not exist."
     exit 1
   fi
 
-  if [ -n "$NC_HAPROXY_SHARED_KEY" ] && [ -n "$NC_HAPROXY_SHARED_KEY_FILE" ]; then
-    echo "ERROR: Only one of NC_HAPROXY_SHARED_KEY or NC_HAPROXY_SHARED_KEY_FILE should be specified."
+  if [ -n "$NC_HARP_SHARED_KEY" ] && [ -n "$NC_HARP_SHARED_KEY_FILE" ]; then
+    echo "ERROR: Only one of NC_HARP_SHARED_KEY or NC_HARP_SHARED_KEY_FILE should be specified."
     exit 1
   fi
 
-  if [ -n "$NC_HAPROXY_SHARED_KEY_FILE" ]; then
-    if [ -s "$NC_HAPROXY_SHARED_KEY_FILE" ]; then
-      NC_HAPROXY_SHARED_KEY="$(cat "$NC_HAPROXY_SHARED_KEY_FILE")"
+  if [ -n "$NC_HARP_SHARED_KEY_FILE" ]; then
+    if [ -s "$NC_HARP_SHARED_KEY_FILE" ]; then
+      NC_HARP_SHARED_KEY="$(cat "$NC_HARP_SHARED_KEY_FILE")"
     else
-      echo "ERROR: NC_HAPROXY_SHARED_KEY_FILE is specified but is empty."
+      echo "ERROR: NC_HARP_SHARED_KEY_FILE is specified but is empty."
       exit 1
     fi
-  elif [ -n "$NC_HAPROXY_SHARED_KEY" ]; then
-    NC_HAPROXY_SHARED_KEY="${NC_HAPROXY_SHARED_KEY}"
+  elif [ -n "$NC_HARP_SHARED_KEY" ]; then
+    NC_HARP_SHARED_KEY="${NC_HARP_SHARED_KEY}"
   else
-    echo "ERROR: Either NC_HAPROXY_SHARED_KEY_FILE or NC_HAPROXY_SHARED_KEY must be set."
+    echo "ERROR: Either NC_HARP_SHARED_KEY_FILE or NC_HARP_SHARED_KEY must be set."
     exit 1
   fi
 
-  export NC_HAPROXY_SHARED_KEY
+  export NC_HARP_SHARED_KEY
 
   # Use envsubst to render the main configuration.
   envsubst < /haproxy.cfg.template > /haproxy.cfg
