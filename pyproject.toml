@@ -1,0 +1,18 @@
+[tool.black]
+line-length = 120
+target-versions = ["py312"]
+preview = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+lint.select = ["A", "B", "C", "D", "E", "F", "G", "I", "S", "SIM", "PIE", "Q", "RET", "RUF", "UP" , "W"]
+lint.extend-ignore = ["D101", "D102", "D103", "D105", "D107", "D203", "D213", "D401", "I001", "RUF100", "D400", "D415"]
+lint.mccabe.max-complexity = 24
+lint.extend-per-file-ignores."development/**/*.py" = [
+  "D",
+  "S",
+]
+
+[tool.isort]
+profile = "black"

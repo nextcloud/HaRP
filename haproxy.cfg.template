@@ -1,0 +1,105 @@
+###############################################################################
+# haproxy.cfg.template
+#
+# This template is processed by envsubst in start.sh to replace variables:
+#   HP_EXAPPS_ADDRESS,
+#   HP_EXAPPS_HTTPS_ADDRESS,
+#   HP_CONTROL_ADDRESS,
+#   HP_CONTROL_HTTPS_ADDRESS,
+#   HP_TIMEOUT_CONNECT,
+#   HP_TIMEOUT_CLIENT,
+#   HP_TIMEOUT_SERVER,
+#
+# If /certs/cert.pem is not found, lines containing "_HTTPS_FRONTEND_" are
+# commented out automatically in start.sh.
+###############################################################################
+
+global
+    log stdout local0 ${HP_LOG_LEVEL_HAPROXY}
+    maxconn 8192
+    ca-base /etc/ssl/certs
+
+defaults
+    log global
+    option httplog
+    option dontlognull
+    timeout connect ${HP_TIMEOUT_CONNECT}
+    timeout client ${HP_TIMEOUT_CLIENT}
+    timeout server ${HP_TIMEOUT_SERVER}
+
+
+###############################################################################
+# FRONTEND: ex_apps (HTTP)
+###############################################################################
+frontend ex_apps
+    mode http
+    bind ${HP_EXAPPS_ADDRESS}
+
+    filter spoe engine exapps-spoe config /etc/haproxy/spoe-agent.conf
+    http-request silent-drop if { var(txn.exapps.good) -m int eq 0 }
+    http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
+
+    default_backend ex_apps_backend
+
+backend ex_apps_backend
+    mode http
+    server frp_server 127.0.0.1
+    http-request set-path %[var(txn.exapps.target_path)]
+    http-request set-dst-port var(txn.exapps.target_port)
+
+###############################################################################
+# FRONTEND: ex_apps_https (only enabled if /certs/cert.pem exists)
+###############################################################################
+_HTTPS_FRONTEND_ frontend ex_apps_https
+_HTTPS_FRONTEND_     mode http
+_HTTPS_FRONTEND_     bind ${HP_EXAPPS_HTTPS_ADDRESS} ssl crt /certs/cert.pem
+
+_HTTPS_FRONTEND_     filter spoe engine exapps-spoe config /etc/haproxy/spoe-agent.conf
+_HTTPS_FRONTEND_     http-request silent-drop if { var(txn.exapps.good) -m int eq 0 }
+_HTTPS_FRONTEND_     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
+
+_HTTPS_FRONTEND_     default_backend ex_apps_backend
+
+###############################################################################
+# FRONTEND: nextcloud_control (HTTP)
+###############################################################################
+frontend nextcloud_control
+    mode http
+    bind ${HP_CONTROL_ADDRESS}
+
+    filter spoe engine blacklist-spoe config /etc/haproxy/spoe-agent.conf
+    http-request silent-drop if { var(txn.blacklist.good) -m int eq 0 }
+
+    filter spoe engine basic-auth-spoe config /etc/haproxy/spoe-agent.conf
+    http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.auth.good) -m int eq 0 }
+
+    http-request allow
+    use_backend dataplane_backend
+
+backend dataplane_backend
+    mode http
+    server dataplane 127.0.0.1:8200
+
+###############################################################################
+# FRONTEND: nextcloud_control_https (only enabled if /certs/cert.pem exists)
+###############################################################################
+_HTTPS_FRONTEND_ frontend nextcloud_control_https
+_HTTPS_FRONTEND_     mode http
+_HTTPS_FRONTEND_     bind ${HP_CONTROL_HTTPS_ADDRESS} ssl crt /certs/cert.pem
+
+_HTTPS_FRONTEND_     filter spoe engine blacklist-spoe config /etc/haproxy/spoe-agent.conf
+_HTTPS_FRONTEND_     http-request silent-drop if { var(txn.blacklist.good) -m int eq 0 }
+
+_HTTPS_FRONTEND_     filter spoe engine basic-auth-spoe config /etc/haproxy/spoe-agent.conf
+_HTTPS_FRONTEND_     http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.auth.good) -m int eq 0 }
+
+_HTTPS_FRONTEND_     http-request allow
+_HTTPS_FRONTEND_     use_backend dataplane_backend
+
+
+backend agents
+    mode tcp
+    timeout connect 5s
+    timeout server  3m
+    option spop-check
+    server agent1 127.0.0.1:9600 check
