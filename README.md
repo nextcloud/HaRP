@@ -25,7 +25,7 @@ In addition, HaRP includes built-in brute-force protection and dynamic routing c
 - **Simplifies Deployment:** Replaces more complex setups (such as DockerSocketProxy) with an easy-to-use container.
 - **Direct Communication:** Routes requests directly to ExApps, bypassing the Nextcloud instance.
 - **Enhanced Security:** Uses brute-force protection and basic authentication to secure all exposed interfaces.
-- **Flexible Frontends:** Supports both HTTP and HTTPS for ExApps, control, and FRP (TCP) frontends.
+- **Flexible Frontends:** Supports both HTTP and HTTPS for ExApps and Nextcloud control, and FRP (TCP) frontend.
 - **Multi-Docker Management:** A single HaRP instance can manage multiple Docker engines.
 - **Automated TLS for FRP:** Generates self-signed certificates for FRP communications (unless explicitly disabled).
 
@@ -44,11 +44,10 @@ docker run \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
   -p 8780:8780 \
-  -p 8782:8782 \
   -d nextcloud-appapi-dsp:harp
 ```
 
-> **Note:** By default, `HP_EXAPPS_ADDRESS` is set to `0.0.0.0:8780`—ensure this port is published to the desired interface (for example, host’s **127.0.0.1:8780**).
+> **Note:** By default, `HP_EXAPPS_ADDRESS` is set to `0.0.0.0:8780` — ensure this port is published to the desired interface (for example, host’s **127.0.0.1:8780**).
 
 #### Using Host Networking
 
@@ -59,7 +58,6 @@ docker run \
   -e NC_HAPROXY_SHARED_KEY="some_very_secure_password" \
   -e NC_INSTANCE_URL="http://nextcloud.local" \
   -e HP_EXAPPS_ADDRESS="192.168.2.5:8780" \
-  -e HP_CONTROL_ADDRESS="127.0.0.1:8782" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
   --network host \
@@ -135,13 +133,6 @@ HaRP is configured via several environment variables. Here are the key variables
   - **Description:** IP:Port for the FRP (TCP) frontends.
   - **Default:** `HP_FRP_ADDRESS="0.0.0.0:8784"`
   - **Note:** Should be accessible from where your ExApps are running.
-
-- **`HP_CONTROL_ADDRESS` / `HP_CONTROL_HTTPS_ADDRESS`**
-  - **Description:** IP:Port for the control interface (receives commands from Nextcloud).
-  - **Default:**
-    - `HP_CONTROL_ADDRESS="0.0.0.0:8782"`
-    - `HP_CONTROL_HTTPS_ADDRESS="0.0.0.0:8783"`
-  - **Optional:** You can omit these if you do not need direct control communication.
 
 - **`NC_HAPROXY_SHARED_KEY`** (or **`NC_HAPROXY_SHARED_KEY_FILE`**)
   - **Description:** A secret token used for authentication between services.
