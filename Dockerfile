@@ -11,13 +11,13 @@
 #     -e HP_EXAPPS_ADDRESS="0.0.0.0:8780" \
 #     -e HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781" \
 #     -e HP_FRP_ADDRESS="0.0.0.0:8782" \
-#     -e NC_HAPROXY_SHARED_KEY="mysecret" \
+#     -e NC_HARP_SHARED_KEY="mysecret" \
 #     --name harp-prod \
 #     harp-prod
 #
 # NOTES:
 #  - If you mount /certs/cert.pem into the container, HTTPS frontend will be enabled.
-#  - NC_HAPROXY_SHARED_KEY or NC_HAPROXY_SHARED_KEY_FILE must be provided at runtime.
+#  - NC_HARP_SHARED_KEY or NC_HARP_SHARED_KEY_FILE must be provided at runtime.
 # -------------------------------------------------------------------------
 
 FROM haproxy:3.1.2-alpine3.21
@@ -36,7 +36,7 @@ ENV HP_EXAPPS_ADDRESS="0.0.0.0:8780" \
     NC_INSTANCE_URL="" \
     HP_LOG_LEVEL="warning"
 
-# NOTE: We do NOT define NC_HAPROXY_SHARED_KEY or NC_HAPROXY_SHARED_KEY_FILE here
+# NOTE: We do NOT define NC_HARP_SHARED_KEY or NC_HARP_SHARED_KEY_FILE here
 # because they must be provided at runtime for security reasons.
 
 RUN set -ex; \
@@ -62,6 +62,7 @@ RUN set -ex; \
 
 # Install the Python SPOA library
 RUN pip install --break-system-packages \
+        pydantic==2.10.6 \
         git+https://github.com/cloud-py-api/haproxy-python-spoa.git
 
 # Copy our scripts and templates

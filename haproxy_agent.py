@@ -1,4 +1,4 @@
-"""An agent for HaProxy that takes care of most of the authentication logic of AppAPI"""
+"""An agent for HaProxy that takes care of most of the authentication logic of AppAPI. Python 3.12 required."""
 
 import asyncio
 import ipaddress
@@ -8,7 +8,7 @@ import os
 import re
 import time
 from ipaddress import IPv4Address, IPv6Address
-from typing import Any
+from pydantic import BaseModel, Field
 
 from aiohttp import web
 from haproxyspoa.payloads.ack import AckPayload
@@ -16,7 +16,7 @@ from haproxyspoa.spoa_server import SpoaServer
 
 
 APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
-SHARED_KEY = os.environ.get("NC_HAPROXY_SHARED_KEY")
+SHARED_KEY = os.environ.get("NC_HARP_SHARED_KEY")
 # Set up the logging configuration
 LOG_LEVEL = os.environ["HP_LOG_LEVEL"].upper()
 logging.basicConfig(level=LOG_LEVEL)
@@ -28,27 +28,28 @@ logging.getLogger("aiohttp").setLevel(level=LOG_LEVEL)
 SPOA_AGENT = SpoaServer()
 
 ###############################################################################
+# Definitions
+###############################################################################
+
+class ExAppRoute(BaseModel):
+    url: str = Field(..., description="REGEX for URL, e.g. r'^api/w/nextcloud/jobs/.*'")
+    access_level: str = Field(..., description="ADMIN, USER, or PUBLIC")
+    bruteforce_protection: list[int] = Field([], description="e.g. [401, 403], etc.")
+
+
+class ExApp(BaseModel):
+    exapp_token: str = Field(...)
+    exapp_version: str = Field(...)
+    port: int = Field(...)
+    routes: list[ExAppRoute] = Field([])
+
+
+###############################################################################
 # In-memory caches
 ###############################################################################
 
 EXAPP_CACHE_LOCK = asyncio.Lock()
-EXAPP_CACHE: dict[str, dict[str, Any]] = {}
-"""
-Example of EXAPP_CACHE[app_id]:
-{
-  "exapp_token": str,
-  "exapp_version": str,
-  "port": int,
-  "routes": [
-    {
-      "url": str,                    # REGEX for URL, e.g. r"^api/w/nextcloud/jobs/.*"
-      "access_level": str,           # "ADMIN", "USER", or "PUBLIC"
-      "bruteforce_protection": list  # e.g. [401, 403], etc.
-    },
-    ...
-  ]
-}
-"""
+EXAPP_CACHE: dict[str, ExApp] = {}
 
 SESSION_CACHE_LOCK = asyncio.Lock()
 SESSION_CACHE: dict[str, dict[str, str]] = {}
@@ -104,24 +105,24 @@ async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
 @SPOA_AGENT.handler("exapps_msg")
 async def exapps_msg(path: str, headers: str, client_ip):
     client_ip_str = str(client_ip)
+    reply = AckPayload()
     LOGGER.debug("Incoming request to ExApp: path=%s, headers=%s, ip=%s", path, headers, client_ip_str)
 
     # Check if the IP is banned based on failed attempts in BLACKLIST_CACHE.
     if await is_ip_banned(client_ip_str):
         LOGGER.warning("IP %s is banned due to excessive failed attempts.", client_ip_str)
-        return AckPayload().set_txn_var("good", 0)
+        return reply.set_txn_var("good", 0)
 
     match = APPID_PATTERN.search(path)
     if not match:
         LOGGER.error("Invalid request path, cannot find AppID: %s", path)
         await record_ip_failure(client_ip_str)
-        return AckPayload().set_txn_var("not_found", 1)
-
+        return reply.set_txn_var("not_found", 1)
     exapp_id = match.group(1)
+    exapp_id_lower = exapp_id.lower()
 
     if exapp_id == "app_api":
         # Special case: AppAPI can send requests to control this Agent
-        reply = AckPayload()
         reply = reply.set_txn_var("app_api", 1)
         if not perform_basic_auth(headers, "app_api", SHARED_KEY):
             await record_ip_failure(client_ip)
@@ -129,56 +130,61 @@ async def exapps_msg(path: str, headers: str, client_ip):
         reply = reply.set_txn_var("target_path", path.removeprefix(f"/exapps/{exapp_id}"))
         return reply.set_txn_var("app_api_auth", 1)
 
-    async with EXAPP_CACHE_LOCK:
-        record = EXAPP_CACHE.get(exapp_id.lower())
-        if record is None:
-            # TO-DO: query AppAPI endpoint for such record
-            record = {
-                "exapp_token": "12345",
-                "exapp_version": "1.1.1",
-                "port": 23000,
-                "routes": [
-                    {"url": "/http", "access_level": "PUBLIC"},
-                    {"url": "/ws", "access_level": "PUBLIC"}
-                ]
-            }
-            #=========================================================================
-            EXAPP_CACHE[exapp_id.lower()] = record
-
-    if not record:
-        LOGGER.error("No such ExApp enabled: %s", exapp_id)
-        await record_ip_failure(client_ip_str)
-        return AckPayload().set_txn_var("not_found", 1)
-
     target_path = path.removeprefix(f"/exapps/{exapp_id}")
-    target_port = record["port"]
+    request_headers = parse_headers(headers)
+    nextcloud_direct_request = False
+    exapp_record = None
+    if all(key in request_headers for key in ["ex-app-version", "ex-app-id", "ex-app-port", "authorization-app-api", "harp-shared-key"]):
+        # This is a direct request from AppAPI to ExApp using AppAPI PHP functions "requestToExAppXXX"
+        if request_headers["harp-shared-key"] == SHARED_KEY:
+            nextcloud_direct_request = True
+            exapp_record = ExApp(
+                exapp_token=request_headers["authorization-app-api"],
+                exapp_version=request_headers["ex-app-version"],
+                port=int(request_headers["ex-app-port"]),
+            )
+        else:
+            await record_ip_failure(client_ip)
+            return reply.set_txn_var("good", 0)
+
+    if not exapp_record:
+        async with EXAPP_CACHE_LOCK:
+            exapp_record = EXAPP_CACHE.get(exapp_id_lower)
+            if not exapp_record:
+                exapp_record = await nc_get_exapp(exapp_id_lower)
+                if not exapp_record:
+                    LOGGER.error("No such ExApp enabled: %s", exapp_id)
+                    await record_ip_failure(client_ip_str)
+                    return reply.set_txn_var("not_found", 1)
+                EXAPP_CACHE[exapp_id_lower] = exapp_record
 
     route_allowed = False
-    for route in record.get("routes", []):
-        if route in ("/heartbeat", "/init", "/enabled"):
-            route_allowed = True  # this is internal ExApp endpoint - they are always allowed.
-            break
-        try:
-            if re.match(route["url"], target_path):
-                route_allowed = True  # TO-DO: we also need to implement access check(ADMIN, USER, PUBLIC)
-                break
-        except re.error as err:
-            LOGGER.error("Invalid regex %s in route for exapp %s: %s", route["url"], exapp_id, err)
+    if target_path in ("/heartbeat", "/init", "/enabled"):
+        if not nextcloud_direct_request:
+            await record_ip_failure(client_ip_str)
+            return reply.set_txn_var("good", 0)
+        route_allowed = True  # this is internal ExApp endpoint and request comes from AppAPI
+    else:
+        for route in exapp_record.routes:
+            try:
+                if re.match(route.url, target_path):
+                    route_allowed = True  # TO-DO: we also need to implement access check(ADMIN, USER, PUBLIC)
+                    break
+            except re.error as err:
+                LOGGER.error("Invalid regex %s in route for exapp %s: %s", route.url, exapp_id, err)
 
     if not route_allowed:
         LOGGER.error("No defined route for handling %s", target_path)
         await record_ip_failure(client_ip_str)
-        return AckPayload().set_txn_var("not_found", 1)
+        return reply.set_txn_var("not_found", 1)
 
-    LOGGER.info("Rerouting request to %s:%s", target_path, target_port)
-
-    reply = AckPayload()
+    LOGGER.info("Rerouting request to %s:%s", target_path, exapp_record.port)
     reply = reply.set_txn_var("not_found", 0)
     reply = reply.set_txn_var("app_api", 0)
-    reply = reply.set_txn_var("target_port", target_port)
+    reply = reply.set_txn_var("target_port", exapp_record.port)
     reply = reply.set_txn_var("target_path", target_path)
-    reply = reply.set_txn_var("exapp_token", record["exapp_token"])
-    reply = reply.set_txn_var("exapp_version", record["exapp_version"])
+    reply = reply.set_txn_var("exapp_token", exapp_record.exapp_token)
+    reply = reply.set_txn_var("exapp_version", exapp_record.exapp_version)
     reply = reply.set_txn_var("exapp_id", exapp_id)
     return reply
 
@@ -209,26 +215,43 @@ async def check_client_ip(client_ip):
 # Helper functions
 ###############################################################################
 
-def perform_basic_auth(headers: str, username: str, password: str) -> bool:
-    # Parse the headers to find the Authorization header.
-    auth_line = None
-    for line in headers.splitlines():
-        if line.lower().startswith("authorization:"):
-            auth_line = line
-            break
+def parse_headers(headers_str: str) -> dict[str, str]:
+    """
+    Parse a string containing HTTP headers into a dictionary.
 
-    if auth_line is None:
+    Each header should be on its own line in the format "Header-Name: value".
+    The header names are normalized to lowercase.
+
+    Example:
+        headers = "Content-Type: application/json\r\nX-Custom-Header: Basic XYZ"
+        parsed = parse_headers(headers)
+        # parsed -> {'content-type': 'application/json', 'X-Custom-Header': 'Basic XYZ'}
+    """
+    headers = {}
+    for line in headers_str.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if ":" not in line:
+            LOGGER.info("Malformed line in header: %s", line)
+            continue
+        key, value = line.split(":", 1)
+        headers[key.strip().lower()] = value.strip()
+    return headers
+
+
+def perform_basic_auth(headers: str, username: str, password: str) -> bool:
+    parsed_headers = parse_headers(headers)
+    auth_value = parsed_headers.get("authorization")
+    if auth_value is None:
         LOGGER.error("Authorization header not found.")
         return False
-    try:
-        # Split on the colon to extract the value.
-        _, value = auth_line.split(":", 1)
-        value = value.strip()
-        if not value.startswith("Basic "):
-            LOGGER.error("Authorization header does not use Basic authentication.")
-            return False
+    if not auth_value.startswith("Basic "):
+        LOGGER.error("Authorization header does not use Basic authentication.")
+        return False
 
-        encoded_credentials = value[6:].strip()
+    encoded_credentials = auth_value[len("Basic "):].strip()
+    try:
         decoded_str = base64.b64decode(encoded_credentials).decode("utf-8")
         if ":" not in decoded_str:
             LOGGER.error("Invalid credentials format.")
@@ -243,8 +266,17 @@ def perform_basic_auth(headers: str, username: str, password: str) -> bool:
     return False
 
 
-async def nc_get_exapp(appid: str) -> dict[str, Any] | None:
-    pass
+async def nc_get_exapp(appid: str) -> ExApp | None:
+    # TO-DO: query AppAPI endpoint for such exapp_record
+    return ExApp(
+        exapp_token="12345",
+        exapp_version="1.1.1",
+        port=23000,
+        routes=[
+            ExAppRoute(url="/http", access_level="PUBLIC"),
+            ExAppRoute(url="/ws", access_level="PUBLIC")
+        ]
+    )
 
 
 ###############################################################################
@@ -267,28 +299,10 @@ async def add_exapp(request: web.Request):
     data = await request.json()
     if not isinstance(data, dict):
         raise web.HTTPBadRequest()
-    if "app_api_token" not in data or not isinstance(data["app_api_token"], str):
-        raise web.HTTPBadRequest()
-    if "routes" not in data or not isinstance(data["routes"], list):
-        raise web.HTTPBadRequest()
-
-    for route in data["routes"]:
-        if not isinstance(route, dict):
-            raise web.HTTPBadRequest()
-        if "url" not in route or not isinstance(route["url"], str):
-            raise web.HTTPBadRequest()
-        if "access_level" not in route or route["access_level"] not in ["ADMIN", "USER", "PUBLIC"]:
-            raise web.HTTPBadRequest()
-        if "bruteforce_protection" in route:
-            if not isinstance(route["bruteforce_protection"], list):
-                raise web.HTTPBadRequest()
-            for code in route["bruteforce_protection"]:
-                if not isinstance(code, int):
-                    raise web.HTTPBadRequest()
 
     # Overwrite if already exists
     async with EXAPP_CACHE_LOCK:
-        EXAPP_CACHE[request.match_info["app_id"].lower()] = data
+        EXAPP_CACHE[request.match_info["app_id"].lower()] = ExApp.model_validate(data)
     return web.HTTPNoContent()
 
 
