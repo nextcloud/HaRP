@@ -4,8 +4,6 @@
 # This template is processed by envsubst in start.sh to replace variables:
 #   HP_EXAPPS_ADDRESS,
 #   HP_EXAPPS_HTTPS_ADDRESS,
-#   HP_CONTROL_ADDRESS,
-#   HP_CONTROL_HTTPS_ADDRESS,
 #   HP_TIMEOUT_CONNECT,
 #   HP_TIMEOUT_CLIENT,
 #   HP_TIMEOUT_SERVER,
@@ -39,6 +37,9 @@ frontend ex_apps
     http-request silent-drop if { var(txn.exapps.good) -m int eq 0 }
     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
 
+    http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.exapps.app_api) -m int eq 1 } { var(txn.exapps.app_api_auth) -m int eq 0 }
+    use_backend dataplane_backend if { var(txn.exapps.app_api) -m int eq 1 }
+
     default_backend ex_apps_backend
 
 backend ex_apps_backend
@@ -58,43 +59,18 @@ _HTTPS_FRONTEND_     filter spoe engine exapps-spoe config /etc/haproxy/spoe-age
 _HTTPS_FRONTEND_     http-request silent-drop if { var(txn.exapps.good) -m int eq 0 }
 _HTTPS_FRONTEND_     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
 
+_HTTPS_FRONTEND_     http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.exapps.app_api) -m int eq 1 } { var(txn.exapps.app_api_auth) -m int eq 0 }
+_HTTPS_FRONTEND_     use_backend dataplane_backend if { var(txn.exapps.app_api) -m int eq 1 }
+
 _HTTPS_FRONTEND_     default_backend ex_apps_backend
 
 ###############################################################################
-# FRONTEND: nextcloud_control (HTTP)
+# BACKEND: nextcloud_control (HTTP)
 ###############################################################################
-frontend nextcloud_control
-    mode http
-    bind ${HP_CONTROL_ADDRESS}
-
-    filter spoe engine blacklist-spoe config /etc/haproxy/spoe-agent.conf
-    http-request silent-drop if { var(txn.blacklist.good) -m int eq 0 }
-
-    filter spoe engine basic-auth-spoe config /etc/haproxy/spoe-agent.conf
-    http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.auth.good) -m int eq 0 }
-
-    http-request allow
-    use_backend dataplane_backend
-
 backend dataplane_backend
     mode http
     server dataplane 127.0.0.1:8200
-
-###############################################################################
-# FRONTEND: nextcloud_control_https (only enabled if /certs/cert.pem exists)
-###############################################################################
-_HTTPS_FRONTEND_ frontend nextcloud_control_https
-_HTTPS_FRONTEND_     mode http
-_HTTPS_FRONTEND_     bind ${HP_CONTROL_HTTPS_ADDRESS} ssl crt /certs/cert.pem
-
-_HTTPS_FRONTEND_     filter spoe engine blacklist-spoe config /etc/haproxy/spoe-agent.conf
-_HTTPS_FRONTEND_     http-request silent-drop if { var(txn.blacklist.good) -m int eq 0 }
-
-_HTTPS_FRONTEND_     filter spoe engine basic-auth-spoe config /etc/haproxy/spoe-agent.conf
-_HTTPS_FRONTEND_     http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.auth.good) -m int eq 0 }
-
-_HTTPS_FRONTEND_     http-request allow
-_HTTPS_FRONTEND_     use_backend dataplane_backend
+    http-request set-path %[var(txn.exapps.target_path)]
 
 
 backend agents

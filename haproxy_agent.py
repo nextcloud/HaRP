@@ -117,6 +117,17 @@ async def exapps_msg(path: str, headers: str, client_ip):
         return AckPayload().set_txn_var("not_found", 1)
 
     exapp_id = match.group(1)
+
+    if exapp_id == "app_api":
+        # Special case: AppAPI can send requests to control this Agent
+        reply = AckPayload()
+        reply = reply.set_txn_var("app_api", 1)
+        if not perform_basic_auth(headers, "app_api", SHARED_KEY):
+            await record_ip_failure(client_ip)
+            return reply.set_txn_var("app_api_auth", 0)
+        reply = reply.set_txn_var("target_path", path.removeprefix(f"/exapps/{exapp_id}"))
+        return reply.set_txn_var("app_api_auth", 1)
+
     async with EXAPP_CACHE_LOCK:
         record = EXAPP_CACHE.get(exapp_id.lower())
         if record is None:
@@ -135,6 +146,7 @@ async def exapps_msg(path: str, headers: str, client_ip):
 
     reply = AckPayload()
     reply = reply.set_txn_var("not_found", 0)
+    reply = reply.set_txn_var("app_api", 0)
     reply = reply.set_txn_var("target_port", target_port)
     reply = reply.set_txn_var("target_path", target_path)
     return reply
@@ -143,40 +155,10 @@ async def exapps_msg(path: str, headers: str, client_ip):
 @SPOA_AGENT.handler("basic_auth_msg")
 async def basic_auth_msg(headers: str, client_ip):
     logger.debug("Received headers: %s, from IP: %s", headers, client_ip)
-    auth_ok = False
-
-    # Parse the headers to find the Authorization header.
-    auth_line = None
-    for line in headers.splitlines():
-        if line.lower().startswith("authorization:"):
-            auth_line = line
-            break
-
-    if auth_line is None:
-        logger.error("Authorization header not found.")
+    auth_ok = perform_basic_auth(headers, "app_api", SHARED_KEY)
+    if auth_ok:
+        logger.debug("Basic auth succeeded for IP: %s", client_ip)
     else:
-        try:
-            # Split on the colon to extract the value.
-            _, value = auth_line.split(":", 1)
-            value = value.strip()
-            if not value.startswith("Basic "):
-                logger.error("Authorization header does not use Basic authentication.")
-            else:
-                encoded_credentials = value[6:].strip()
-                decoded_str = base64.b64decode(encoded_credentials).decode("utf-8")
-                if ":" not in decoded_str:
-                    logger.error("Invalid credentials format.")
-                else:
-                    username, password = decoded_str.split(":", 1)
-                    if username == "app_api" and password == SHARED_KEY:
-                        auth_ok = True
-                        logger.debug("Basic auth succeeded for IP: %s", client_ip)
-                    else:
-                        logger.error("Invalid username or password.")
-        except Exception as e:
-            logger.error("Error processing basic auth credentials: %s", e)
-
-    if not auth_ok:
         await record_ip_failure(client_ip)
     return AckPayload().set_txn_var("good", auth_ok)
 
@@ -195,6 +177,40 @@ async def check_client_ip(client_ip):
 ###############################################################################
 # Helper functions
 ###############################################################################
+
+def perform_basic_auth(headers: str, username: str, password: str) -> bool:
+    # Parse the headers to find the Authorization header.
+    auth_line = None
+    for line in headers.splitlines():
+        if line.lower().startswith("authorization:"):
+            auth_line = line
+            break
+
+    if auth_line is None:
+        logger.error("Authorization header not found.")
+        return False
+    try:
+        # Split on the colon to extract the value.
+        _, value = auth_line.split(":", 1)
+        value = value.strip()
+        if not value.startswith("Basic "):
+            logger.error("Authorization header does not use Basic authentication.")
+            return False
+
+        encoded_credentials = value[6:].strip()
+        decoded_str = base64.b64decode(encoded_credentials).decode("utf-8")
+        if ":" not in decoded_str:
+            logger.error("Invalid credentials format.")
+            return False
+
+        in_username, in_password = decoded_str.split(":", 1)
+        if in_username == username and in_password == password:
+            return True
+        logger.error("Invalid username or password.")
+    except Exception as e:
+        logger.error("Error processing basic auth credentials: %s", e)
+    return False
+
 
 async def nc_get_exapp(appid: str) -> dict[str, Any] | None:
     pass

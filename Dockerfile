@@ -1,6 +1,6 @@
 # -------------------------------------------------------------------------
 # Dockerfile for HaRP (HAProxy + FRP + Python SPOE agent),
-# with Nextcloud Control and flexible (HTTP/HTTPS) frontends for ExApps, FRP, and Control.
+# with frontends(HTTP/HTTPS) for Nextcloud Control and ExApps.
 #
 # Usage example:
 #   docker build -t harp-prod .
@@ -8,19 +8,15 @@
 #     -p 8780:8780 \
 #     -p 8781:8781 \
 #     -p 8782:8782 \
-#     -p 8783:8783 \
-#     -p 8784:8784 \
 #     -e HP_EXAPPS_ADDRESS="0.0.0.0:8780" \
 #     -e HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781" \
-#     -e HP_CONTROL_ADDRESS="0.0.0.0:8782" \
-#     -e HP_CONTROL_HTTPS_ADDRESS="0.0.0.0:8783" \
-#     -e HP_FRP_ADDRESS="0.0.0.0:8784" \
+#     -e HP_FRP_ADDRESS="0.0.0.0:8782" \
 #     -e NC_HAPROXY_SHARED_KEY="mysecret" \
 #     --name harp-prod \
 #     harp-prod
 #
 # NOTES:
-#  - If you mount /certs/cert.pem into the container, HTTPS frontends will be enabled.
+#  - If you mount /certs/cert.pem into the container, HTTPS frontend will be enabled.
 #  - NC_HAPROXY_SHARED_KEY or NC_HAPROXY_SHARED_KEY_FILE must be provided at runtime.
 # -------------------------------------------------------------------------
 
@@ -28,13 +24,11 @@ FROM haproxy:3.1.2-alpine3.21
 
 USER root
 
-# Bind addresses for 6 frontends (HTTP + HTTPS for exapps, frp, control).
-# If /certs/cert.pem does not exist, HTTPS frontends are disabled automatically.
+# Bind addresses for 2 frontends (HTTP + HTTPS for exapp) and FRP Server.
+# If /certs/cert.pem does not exist, EXAPPS HTTPS frontend are disabled automatically.
 ENV HP_EXAPPS_ADDRESS="0.0.0.0:8780" \
     HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781" \
-    HP_CONTROL_ADDRESS="0.0.0.0:8782" \
-    HP_CONTROL_HTTPS_ADDRESS="0.0.0.0:8783" \
-    HP_FRP_ADDRESS="0.0.0.0:8784" \
+    HP_FRP_ADDRESS="0.0.0.0:8782" \
     HP_FRP_DISABLE_TLS="false" \
     HP_TIMEOUT_CONNECT="10s" \
     HP_TIMEOUT_CLIENT="30s" \

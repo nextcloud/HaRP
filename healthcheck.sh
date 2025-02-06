@@ -5,7 +5,7 @@
 #   - Checks if Python SPOE HTTP Control API is listening on 127.0.0.1:8200.
 #   - Checks if SPOE Agent is running on 127.0.0.1:9600.
 #   - Checks FRP port at HP_FRP_ADDRESS.
-#   - Checks either 2 or 4 frontends depending on whether /certs/cert.pem exists.
+#   - Checks EXAPPS HTTP frontend, and also the EXAPPS HTTPS frontend if the /certs/cert.pem file exists.
 #
 # This script returns 0 if all checks pass, 1 otherwise.
 
@@ -51,7 +51,7 @@ check_port () {
 }
 
 # 4) Check FRP port
-check_port "${HP_FRP_ADDRESS:-0.0.0.0:8784}"
+check_port "${HP_FRP_ADDRESS:-0.0.0.0:8782}"
 
 # 5) Decide which frontends to check in HAProxy
 CERT_PRESENT=0
@@ -59,14 +59,12 @@ if [ -f "/certs/cert.pem" ]; then
   CERT_PRESENT=1
 fi
 
-# We always check the 2 HTTP frontends for exapps and control
+# We always check the EXAPPS HTTP frontend
 check_port "${HP_EXAPPS_ADDRESS:-0.0.0.0:8780}"
-check_port "${HP_CONTROL_ADDRESS:-0.0.0.0:8782}"
 
-# If there's a cert, we also check the 2 HTTPS frontends
+# If there's a cert, we also check the EXAPPS HTTPS frontend
 if [ "$CERT_PRESENT" -eq 1 ]; then
   check_port "${HP_EXAPPS_HTTPS_ADDRESS:-0.0.0.0:8781}"
-  check_port "${HP_CONTROL_HTTPS_ADDRESS:-0.0.0.0:8783}"
 fi
 
 echo "OK: All checks passed. FRP, HAProxy agent and HAProxy itself appear to be working."
