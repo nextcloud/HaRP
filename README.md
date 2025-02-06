@@ -131,7 +131,7 @@ HaRP is configured via several environment variables. Here are the key variables
 
 - **`HP_FRP_ADDRESS`**
   - **Description:** IP:Port for the FRP (TCP) frontends.
-  - **Default:** `HP_FRP_ADDRESS="0.0.0.0:8784"`
+  - **Default:** `HP_FRP_ADDRESS="0.0.0.0:8782"`
   - **Note:** Should be accessible from where your ExApps are running.
 
 - **`NC_HAPROXY_SHARED_KEY`** (or **`NC_HAPROXY_SHARED_KEY_FILE`**)

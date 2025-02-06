@@ -205,7 +205,7 @@ transport.tls.keyFile = "/certs/frp/server.key"
 transport.tls.trustedCaFile = "/certs/frp/ca.crt"
 
 log.to = "/frps.log"
-log.level = "warn"
+log.level = "info"
 log.maxDays = 3
 
 maxPortsPerClient = 1
