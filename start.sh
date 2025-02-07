@@ -207,7 +207,8 @@ fi
 # ----------------------------------------------------------------------------
 # Prepare FRP configuration
 # ----------------------------------------------------------------------------
-if [ "${HP_FRP_DISABLE_TLS}" != "true" ]; then
+if [ ! -f "/frps.toml" ]; then
+  if [ "${HP_FRP_DISABLE_TLS}" != "true" ]; then
 cat <<EOF >/frps.toml
 bindAddr = "${FRP_HOST}"
 bindPort = ${FRP_PORT}
@@ -222,7 +223,8 @@ log.maxDays = 3
 
 maxPortsPerClient = 1
 allowPorts = [
-  { start = 23000, end = 23999 }
+  { start = 23000, end = 23999 },
+  { start = 24000, end = 24099 }
 ]
 
 [[httpPlugins]]
@@ -230,7 +232,7 @@ addr = "127.0.0.1:8200"
 path = "/frp_handler"
 ops = ["Login"]
 EOF
-else
+  else
 cat <<EOF >/frps.toml
 bindAddr = "${FRP_HOST}"
 bindPort = ${FRP_PORT}
@@ -241,7 +243,8 @@ log.maxDays = 3
 
 maxPortsPerClient = 1
 allowPorts = [
-  { start = 23000, end = 23999 }
+  { start = 23000, end = 23999 },
+  { start = 24000, end = 24099 }
 ]
 
 [[httpPlugins]]
@@ -249,6 +252,55 @@ addr = "127.0.0.1:8200"
 path = "/frp_handler"
 ops = ["Login"]
 EOF
+  fi
+  log "INFO: FRP server configuration generated at /frps.toml."
+else
+  log "INFO: /frps.toml already exists. Skipping FRP server configuration generation..."
+fi
+
+# ----------------------------------------------------------------------------
+# Prepare FRP client configuration for Docker if /var/run/docker.sock is present
+# ----------------------------------------------------------------------------
+if [ -e "/var/run/docker.sock" ]; then
+  LOCAL_FRP_HOST="$FRP_HOST"
+  [ "$LOCAL_FRP_HOST" = "0.0.0.0" ] && LOCAL_FRP_HOST="127.0.0.1"
+  if [ ! -f "/frpc-docker.toml" ]; then
+    log "INFO: Detected /var/run/docker.sock, generating /frpc-docker.toml configuration file..."
+    if [ "${HP_FRP_DISABLE_TLS}" != "true" ]; then
+cat <<EOF >/frpc-docker.toml
+serverAddr = "${LOCAL_FRP_HOST}"
+serverPort = ${FRP_PORT}
+metadatas.token = "${NC_HARP_SHARED_KEY}"
+transport.tls.certFile = "/certs/frp/client.crt"
+transport.tls.keyFile = "/certs/frp/client.key"
+transport.tls.trustedCaFile = "/certs/frp/ca.crt"
+
+[[proxies]]
+remotePort = 24000
+type = "tcp"
+name = "deploy-daemon"
+[proxies.plugin]
+type = "unix_domain_socket"
+unixPath = "/var/run/docker.sock"
+EOF
+    else
+cat <<EOF >/frpc-docker.toml
+serverAddr = "${LOCAL_FRP_HOST}"
+serverPort = ${FRP_PORT}
+metadatas.token = "${NC_HARP_SHARED_KEY}"
+
+[[proxies]]
+remotePort = 24000
+type = "tcp"
+name = "deploy-daemon"
+[proxies.plugin]
+type = "unix_domain_socket"
+unixPath = "/var/run/docker.sock"
+EOF
+    fi
+  else
+    log "INFO: /frpc-docker.toml already exists. Skipping generation..."
+  fi
 fi
 
 log "INFO: Starting Python HaProxy Agent on 127.0.0.1:8200 and 127.0.0.1:9600..."
@@ -258,6 +310,13 @@ sleep 1s
 
 log "INFO: Starting FRP server on ${HP_FRP_ADDRESS}..."
 frps -c /frps.toml &
+
+sleep 1s
+
+if [ -e "/var/run/docker.sock" ]; then
+  log "INFO: Starting FRP client for Docker Engine..."
+  frpc -c /frpc-docker.toml &
+fi
 
 log "INFO: Starting HAProxy..."
 exec haproxy -f /haproxy.cfg -W -db

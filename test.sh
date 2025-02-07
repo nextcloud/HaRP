@@ -15,6 +15,9 @@ docker run --rm \
   -e NC_HARP_SHARED_KEY="mysecret" \
   -e HP_LOG_LEVEL="info" \
   -e HP_VERBOSE_START="1" \
+  -e NC_INSTANCE_URL="http://nextcloud.local" \
   -v `pwd`/certs:/certs \
+  -v /var/run/docker.sock:/var/run/docker.sock \
   --name harp-prod \
+  --network=host \
   harp-prod

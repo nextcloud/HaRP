@@ -170,6 +170,52 @@ HaRP is configured via several environment variables. Here are the key variables
     - **Description:** Timeout for server-side connections. **We do not recommend to change this value.**
     - **Default:** `1800s`
 
+## Connecting Docker Engines
+
+HaRP supports two approaches for connecting Docker Engines:
+
+### 1. Direct Mounting (Local Docker Engine)
+
+If your Docker Engine is running on the same host as **HaRP**, simply mount the Docker socket into the container. This direct method allows HaRP to interact with the Docker Engine immediately:
+
+```bash
+-v /var/run/docker.sock:/var/run/docker.sock
+```
+
+### 2. Connecting External Docker Engines via FRP
+
+For remote or external Docker Engines—or if you prefer not to mount the Docker socket—you can use an FRP (Fast Reverse Proxy) client to establish a secure connection. Follow these steps:
+
+1. **Retrieve Certificate Files:**
+   HaRP automatically generates the necessary FRP certificate files. Use the appropriate Nextcloud AppAPI command (commonly via `occ`) to retrieve the following files from the HaRP container:
+   - `client.crt`
+   - `client.key`
+   - `ca.crt`
+
+2. **Create an FRP Client Configuration:**
+   With the certificate files in hand, create a configuration file (for example, `frpc.toml`) on the Docker Engine host. Below is a sample configuration:
+
+   ```toml
+   # frpc.toml
+   serverAddr = "your.harp.server.address"  # Replace with your HP_FRP_ADDRESS host
+   serverPort = 8782                         # Default port for FRP
+   transport.tls.certFile = "certs/frp/client.crt"
+   transport.tls.keyFile = "certs/frp/client.key"
+   transport.tls.trustedCaFile = "certs/frp/ca.crt"
+
+   [[proxies]]
+   # Choose a unique remotePort for each Docker Engine (range: 24001-24099)
+   remotePort = 24001
+   type = "tcp"
+   name = "deploy-daemon"
+   [proxies.plugin]
+   type = "unix_domain_socket"
+   unixPath = "/var/run/docker.sock"
+   ```
+
+3. **Deploy the FRP Client:**
+   Run the FRP client on the host with the Docker Engine using the configuration file. This establishes a secure tunnel between the remote Docker Engine and HaRP. Each connection requires a unique `remotePort` value; HaRP supports up to 99 Docker Engines by assigning a different port in the allowed range.
+
 ## Contributing
 
 Contributions to HaRP are welcome. Feel free to open issues, discussions or submit pull requests with improvements, bug fixes, or new features.
