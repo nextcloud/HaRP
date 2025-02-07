@@ -9,6 +9,6 @@ transport.tls.trustedCaFile = "../../certs/frp/ca.crt"
 name = "test-tcp"
 type = "tcp"
 localIP = "127.0.0.1"
-localPort = 24000
+localPort = 30000
 remotePort = 23000
 transport.useEncryption = true

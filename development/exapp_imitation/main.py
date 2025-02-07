@@ -21,4 +21,19 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:APP", host="127.0.0.1", port=24000, log_level="info")
+    uvicorn.run("main:APP", host="127.0.0.1", port=30000, log_level="info")
+
+
+# patch code for "haproxy_agent.py"
+"""
+async def nc_get_exapp(app_id: str) -> ExApp | None:
+    return ExApp(
+        exapp_token="12345",
+        exapp_version="1.1.1",
+        port=23000,
+        routes=[
+            ExAppRoute(url="/http", access_level="PUBLIC"),
+            ExAppRoute(url="/ws", access_level="PUBLIC")
+        ]
+    )
+"""

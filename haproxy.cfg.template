@@ -37,13 +37,10 @@ frontend ex_apps
     bind ${HP_EXAPPS_ADDRESS}
 
     filter spoe engine exapps-spoe config /etc/haproxy/spoe-agent.conf
-    http-request silent-drop if { var(txn.exapps.good) -m int eq 0 }
+    http-request silent-drop if { var(txn.exapps.bad_request) -m int eq 1 }
+    http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.exapps.unauthorized) -m int eq 1 }
     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
-
-    http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.exapps.app_api) -m int eq 1 } { var(txn.exapps.app_api_auth) -m int eq 0 }
-    use_backend dataplane_backend if { var(txn.exapps.app_api) -m int eq 1 }
-
-    default_backend ex_apps_backend
+    use_backend %[var(txn.exapps.backend)]
 
 backend ex_apps_backend
     mode http
@@ -62,20 +59,26 @@ _HTTPS_FRONTEND_     mode http
 _HTTPS_FRONTEND_     bind ${HP_EXAPPS_HTTPS_ADDRESS} ssl crt /certs/cert.pem
 
 _HTTPS_FRONTEND_     filter spoe engine exapps-spoe config /etc/haproxy/spoe-agent.conf
-_HTTPS_FRONTEND_     http-request silent-drop if { var(txn.exapps.good) -m int eq 0 }
+_HTTPS_FRONTEND_     http-request silent-drop if { var(txn.exapps.bad_request) -m int eq 1 }
+_HTTPS_FRONTEND_     http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.exapps.unauthorized) -m int eq 1 }
 _HTTPS_FRONTEND_     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
-
-_HTTPS_FRONTEND_     http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.exapps.app_api) -m int eq 1 } { var(txn.exapps.app_api_auth) -m int eq 0 }
-_HTTPS_FRONTEND_     use_backend dataplane_backend if { var(txn.exapps.app_api) -m int eq 1 }
-
-_HTTPS_FRONTEND_     default_backend ex_apps_backend
+_HTTPS_FRONTEND_     use_backend %[var(txn.exapps.backend)]
 
 ###############################################################################
 # BACKEND: nextcloud_control (HTTP)
 ###############################################################################
-backend dataplane_backend
+backend nextcloud_control_backend
     mode http
-    server dataplane 127.0.0.1:8200
+    server nextcloud_control 127.0.0.1:8200
+    http-request set-path %[var(txn.exapps.target_path)]
+
+###############################################################################
+# BACKEND: docker_engine (HTTP)
+###############################################################################
+backend docker_engine_backend
+    mode http
+    server frp_server 127.0.0.1
+    http-request set-dst-port var(txn.exapps.target_port)
     http-request set-path %[var(txn.exapps.target_path)]
 
 
