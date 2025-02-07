@@ -10,6 +10,7 @@ import time
 from ipaddress import IPv4Address, IPv6Address
 
 import aiohttp
+import pydantic
 from aiohttp import web
 from haproxyspoa.payloads.ack import AckPayload
 from haproxyspoa.spoa_server import SpoaServer
@@ -159,9 +160,11 @@ async def exapps_msg(path: str, headers: str, client_ip):
                         await record_ip_failure(client_ip_str)
                         return reply.set_txn_var("not_found", 1)
                     EXAPP_CACHE[exapp_id_lower] = exapp_record
-                except RequestFailException as e:
+                except pydantic.ValidationError as e:
+                    LOGGER.error("Invalid ExApp metadata from Nextcloud: %s", e)
+                    return reply.set_txn_var("not_found", 1)
+                except Exception as e:
                     LOGGER.exception("Failed to fetch ExApp metadata from Nextcloud", exc_info=e)
-                    await record_ip_failure(client_ip_str)
                     return reply.set_txn_var("not_found", 1)
 
     route_allowed = False
@@ -277,9 +280,6 @@ EX_APP_URL = f"{ \
     NC_INSTANCE_URL.removesuffix('/').removesuffix('/index.php') \
 }/index.php/apps/app_api/harp/exapp-meta"
 
-class RequestFailException(Exception):
-    pass
-
 async def nc_get_exapp(app_id: str) -> ExApp | None:
     async with aiohttp.ClientSession() as session, session.get(EX_APP_URL, headers={
         "harp-shared-key": SHARED_KEY
@@ -287,12 +287,11 @@ async def nc_get_exapp(app_id: str) -> ExApp | None:
         "appId": app_id
     }) as resp:
         if not resp.ok:
-            raise RequestFailException("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
-        try:
-            data = await resp.json()
-            return ExApp.model_validate(data)
-        except Exception as e:
-            raise RequestFailException("Error processing ExApp metadata.") from e
+            if resp.status == 404:
+                return None
+            raise Exception("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
+        data = await resp.json()
+        return ExApp.model_validate(data)
 
 
 ###############################################################################
