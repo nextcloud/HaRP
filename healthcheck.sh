@@ -1,5 +1,8 @@
 #!/bin/sh
-#
+
+# SPDX-FileCopyrightText: 2025 Nextcloud GmbH and Nextcloud contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 # healthcheck.sh
 #   - Validates HAProxy config syntax.
 #   - Checks if Python SPOE HTTP Control API is listening on 127.0.0.1:8200.

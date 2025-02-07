@@ -1,6 +1,9 @@
 #!/bin/sh
 set -e
 
+# SPDX-FileCopyrightText: 2025 Nextcloud GmbH and Nextcloud contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 # ----------------------------------------------------------------------------
 # start.sh
 #  - Generates self-signed certificates for FRP Server and FRP Clients
