@@ -1,22 +1,23 @@
 """An agent for HaProxy that takes care of most of the authentication logic of AppAPI. Python 3.12 required."""
 
 import asyncio
+import base64
 import ipaddress
 import logging
-import base64
 import os
 import re
 import time
 from ipaddress import IPv4Address, IPv6Address
-from pydantic import BaseModel, Field
 
+import aiohttp
 from aiohttp import web
 from haproxyspoa.payloads.ack import AckPayload
 from haproxyspoa.spoa_server import SpoaServer
-
+from pydantic import BaseModel, Field
 
 APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
 SHARED_KEY = os.environ.get("NC_HARP_SHARED_KEY")
+NC_INSTANCE_URL = os.environ.get("NC_INSTANCE_URL")
 # Set up the logging configuration
 LOG_LEVEL = os.environ["HP_LOG_LEVEL"].upper()
 logging.basicConfig(level=LOG_LEVEL)
@@ -26,6 +27,10 @@ logging.getLogger("haproxyspoa").setLevel(level=LOG_LEVEL)
 logging.getLogger("aiohttp").setLevel(level=LOG_LEVEL)
 
 SPOA_AGENT = SpoaServer()
+
+# todo: better error checking
+assert SHARED_KEY != "", "NC_HARP_SHARED_KEY is not set"
+assert NC_INSTANCE_URL != "", "NC_INSTANCE_URL is not set"
 
 ###############################################################################
 # Definitions
@@ -44,12 +49,18 @@ class ExApp(BaseModel):
     routes: list[ExAppRoute] = Field([])
 
 
+ExAppDict = dict[str, ExApp]
+
+class ExAppInitialResponse(BaseModel):
+    ex_apps: ExAppDict
+
+
 ###############################################################################
 # In-memory caches
 ###############################################################################
 
 EXAPP_CACHE_LOCK = asyncio.Lock()
-EXAPP_CACHE: dict[str, ExApp] = {}
+EXAPP_CACHE: ExAppDict = {}
 
 SESSION_CACHE_LOCK = asyncio.Lock()
 SESSION_CACHE: dict[str, dict[str, str]] = {}
@@ -121,17 +132,17 @@ async def exapps_msg(path: str, headers: str, client_ip):
     exapp_id = match.group(1)
     exapp_id_lower = exapp_id.lower()
 
+    request_headers = parse_headers(headers)
     if exapp_id == "app_api":
         # Special case: AppAPI can send requests to control this Agent
         reply = reply.set_txn_var("app_api", 1)
-        if not perform_basic_auth(headers, "app_api", SHARED_KEY):
+        if request_headers["harp-shared-key"] != SHARED_KEY:
             await record_ip_failure(client_ip)
             return reply.set_txn_var("app_api_auth", 0)
         reply = reply.set_txn_var("target_path", path.removeprefix(f"/exapps/{exapp_id}"))
         return reply.set_txn_var("app_api_auth", 1)
 
     target_path = path.removeprefix(f"/exapps/{exapp_id}")
-    request_headers = parse_headers(headers)
     nextcloud_direct_request = False
     exapp_record = None
     if all(key in request_headers for key in ["ex-app-version", "ex-app-id", "ex-app-port", "authorization-app-api", "harp-shared-key"]):
@@ -149,14 +160,19 @@ async def exapps_msg(path: str, headers: str, client_ip):
 
     if not exapp_record:
         async with EXAPP_CACHE_LOCK:
-            exapp_record = EXAPP_CACHE.get(exapp_id_lower)
-            if not exapp_record:
-                exapp_record = await nc_get_exapp(exapp_id_lower)
-                if not exapp_record:
-                    LOGGER.error("No such ExApp enabled: %s", exapp_id)
+            if EXAPP_CACHE == {}:
+                exapps_resp = await nc_get_exapps()
+                if not exapps_resp:
+                    # the bruteforce_protection should not work in case of network failures but we can't do anything about it
                     await record_ip_failure(client_ip_str)
                     return reply.set_txn_var("not_found", 1)
-                EXAPP_CACHE[exapp_id_lower] = exapp_record
+                EXAPP_CACHE.update(exapps_resp.ex_apps)
+
+            exapp_record = EXAPP_CACHE.get(exapp_id_lower)
+            if not exapp_record:
+                LOGGER.error("No such ExApp enabled: %s", exapp_id)
+                await record_ip_failure(client_ip_str)
+                return reply.set_txn_var("not_found", 1)
 
     route_allowed = False
     if target_path in ("/heartbeat", "/init", "/enabled"):
@@ -189,6 +205,7 @@ async def exapps_msg(path: str, headers: str, client_ip):
     return reply
 
 
+# todo
 @SPOA_AGENT.handler("basic_auth_msg")
 async def basic_auth_msg(headers: str, client_ip):
     LOGGER.debug("Received headers: %s, from IP: %s", headers, client_ip)
@@ -266,17 +283,23 @@ def perform_basic_auth(headers: str, username: str, password: str) -> bool:
     return False
 
 
-async def nc_get_exapp(appid: str) -> ExApp | None:
-    # TO-DO: query AppAPI endpoint for such exapp_record
-    return ExApp(
-        exapp_token="12345",
-        exapp_version="1.1.1",
-        port=23000,
-        routes=[
-            ExAppRoute(url="/http", access_level="PUBLIC"),
-            ExAppRoute(url="/ws", access_level="PUBLIC")
-        ]
-    )
+EX_APPS_URL = f"{ \
+    NC_INSTANCE_URL.removesuffix('/').removesuffix('/index.php') \
+}/index.php/apps/app_api/harp/exapps-meta"
+
+async def nc_get_exapps() -> ExAppInitialResponse | None:
+    async with aiohttp.ClientSession() as session, session.get(EX_APPS_URL, headers={
+        "harp-shared-key": SHARED_KEY
+    }) as resp:
+        if not resp.ok:
+            LOGGER.error("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
+            return None
+        try:
+            data = await resp.json()
+            return ExAppInitialResponse.model_validate(data)
+        except Exception as e:
+            LOGGER.error("Error processing ExApp metadata: %s", e)
+            return None
 
 
 ###############################################################################
