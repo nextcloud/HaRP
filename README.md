@@ -1,3 +1,7 @@
+<!--
+ - SPDX-FileCopyrightText: 2025 Nextcloud GmbH and Nextcloud contributors
+ - SPDX-License-Identifier: AGPL-3.0-or-later
+-->
 # Nextcloud AppAPI HaProxy Reversed Proxy (HaRP)
 
 **Note:** *Work is still in progress*
@@ -6,15 +10,15 @@
 
 ## Overview
 
-HaRP is a **reverse proxy system** designed to simplify the deployment workflow for Nextcloud 32’s AppAPI. 
+HaRP is a **reverse proxy system** designed to simplify the deployment workflow for Nextcloud 32’s AppAPI.
 
-It enables direct communication between clients and ExApps, bypassing the Nextcloud instance to improve performance and reduce the complexity traditionally associated with `DockerSocketProxy` setups. 
+It enables direct communication between clients and ExApps, bypassing the Nextcloud instance to improve performance and reduce the complexity traditionally associated with `DockerSocketProxy` setups.
 
-HaRP provides a flexible and scalable solution for managing ExApps, supporting deployments both locally and on remote servers. 
+HaRP provides a flexible and scalable solution for managing ExApps, supporting deployments both locally and on remote servers.
 
-It can be installed alongside Nextcloud or on a separate host, allowing for optimized performance and security. 
+It can be installed alongside Nextcloud or on a separate host, allowing for optimized performance and security.
 
-The system supports simultaneous HTTP and HTTPS communication, enabling trusted networks to use direct HTTP access while securing external or untrusted connections via HTTPS. 
+The system supports simultaneous HTTP and HTTPS communication, enabling trusted networks to use direct HTTP access while securing external or untrusted connections via HTTPS.
 
 In addition, HaRP includes built-in brute-force protection and dynamic routing capabilities, making it well-suited for a wide range of network infrastructures, from simple home setups to large distributed environments.
 
