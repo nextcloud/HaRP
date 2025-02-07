@@ -31,6 +31,16 @@ log() {
     fi
 }
 
+# Check if the required environment variables are set
+if [ -z "$HP_FRP_ADDRESS" ]; then
+    echo "ERROR: HP_FRP_ADDRESS is not set."
+    exit 1
+fi
+if [ -z "$NC_INSTANCE_URL" ]; then
+    echo "ERROR: NC_INSTANCE_URL is not set."
+    exit 1
+fi
+
 # Initialize FRP_HOST and FRP_PORT once to avoid parsing HP_FRP_ADDRESS multiple times.
 FRP_HOST="$(echo "$HP_FRP_ADDRESS" | cut -d':' -f1)"
 FRP_PORT="$(echo "$HP_FRP_ADDRESS" | cut -d':' -f2)"
