@@ -28,10 +28,6 @@ logging.getLogger("aiohttp").setLevel(level=LOG_LEVEL)
 
 SPOA_AGENT = SpoaServer()
 
-# todo: better error checking
-assert SHARED_KEY != "", "NC_HARP_SHARED_KEY is not set"
-assert NC_INSTANCE_URL != "", "NC_INSTANCE_URL is not set"
-
 ###############################################################################
 # Definitions
 ###############################################################################
@@ -49,18 +45,12 @@ class ExApp(BaseModel):
     routes: list[ExAppRoute] = Field([])
 
 
-ExAppDict = dict[str, ExApp]
-
-class ExAppInitialResponse(BaseModel):
-    ex_apps: ExAppDict
-
-
 ###############################################################################
 # In-memory caches
 ###############################################################################
 
 EXAPP_CACHE_LOCK = asyncio.Lock()
-EXAPP_CACHE: ExAppDict = {}
+EXAPP_CACHE: dict[str, ExApp] = {}
 
 SESSION_CACHE_LOCK = asyncio.Lock()
 SESSION_CACHE: dict[str, dict[str, str]] = {}
@@ -160,19 +150,19 @@ async def exapps_msg(path: str, headers: str, client_ip):
 
     if not exapp_record:
         async with EXAPP_CACHE_LOCK:
-            if EXAPP_CACHE == {}:
-                exapps_resp = await nc_get_exapps()
-                if not exapps_resp:
-                    # the bruteforce_protection should not work in case of network failures but we can't do anything about it
-                    await record_ip_failure(client_ip_str)
-                    return reply.set_txn_var("not_found", 1)
-                EXAPP_CACHE.update(exapps_resp.ex_apps)
-
             exapp_record = EXAPP_CACHE.get(exapp_id_lower)
             if not exapp_record:
-                LOGGER.error("No such ExApp enabled: %s", exapp_id)
-                await record_ip_failure(client_ip_str)
-                return reply.set_txn_var("not_found", 1)
+                try:
+                    exapp_record = await nc_get_exapp(exapp_id_lower)
+                    if not exapp_record:
+                        LOGGER.error("No such ExApp enabled: %s", exapp_id)
+                        await record_ip_failure(client_ip_str)
+                        return reply.set_txn_var("not_found", 1)
+                    EXAPP_CACHE[exapp_id_lower] = exapp_record
+                except RequestFailException as e:
+                    LOGGER.exception("Failed to fetch ExApp metadata from Nextcloud", exc_info=e)
+                    await record_ip_failure(client_ip_str)
+                    return reply.set_txn_var("not_found", 1)
 
     route_allowed = False
     if target_path in ("/heartbeat", "/init", "/enabled"):
@@ -283,23 +273,26 @@ def perform_basic_auth(headers: str, username: str, password: str) -> bool:
     return False
 
 
-EX_APPS_URL = f"{ \
+EX_APP_URL = f"{ \
     NC_INSTANCE_URL.removesuffix('/').removesuffix('/index.php') \
-}/index.php/apps/app_api/harp/exapps-meta"
+}/index.php/apps/app_api/harp/exapp-meta"
 
-async def nc_get_exapps() -> ExAppInitialResponse | None:
-    async with aiohttp.ClientSession() as session, session.get(EX_APPS_URL, headers={
+class RequestFailException(Exception):
+    pass
+
+async def nc_get_exapp(app_id: str) -> ExApp | None:
+    async with aiohttp.ClientSession() as session, session.get(EX_APP_URL, headers={
         "harp-shared-key": SHARED_KEY
+    }, params={
+        "appId": app_id
     }) as resp:
         if not resp.ok:
-            LOGGER.error("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
-            return None
+            raise RequestFailException("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
         try:
             data = await resp.json()
-            return ExAppInitialResponse.model_validate(data)
+            return ExApp.model_validate(data)
         except Exception as e:
-            LOGGER.error("Error processing ExApp metadata: %s", e)
-            return None
+            raise RequestFailException("Error processing ExApp metadata.") from e
 
 
 ###############################################################################
