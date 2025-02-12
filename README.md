@@ -216,6 +216,39 @@ For remote or external Docker Engines—or if you prefer not to mount the Docker
 3. **Deploy the FRP Client:**
    Run the FRP client on the host with the Docker Engine using the configuration file. This establishes a secure tunnel between the remote Docker Engine and HaRP. Each connection requires a unique `remotePort` value; HaRP supports up to 99 Docker Engines by assigning a different port in the allowed range.
 
+## Adapting ExApps to use HaRP
+
+> We strongly recommend starting support for `HaRP` in ExApps from the start of Nextcloud `32`, as the old `DSP` way will be deprecated and marked for removal in Nextcloud `35`.
+>
+> Adding `HaRP` support is fully compatible with the existing `DSP` system, so you won’t need to maintain two separate release types of your ExApp.
+
+1. Copy the `start.s`h script from the `exapps_dev` folder of this repository and set it as the entry point in your ExApp’s `Dockerfile`.
+2. After copying `start.sh`, edit its last line so that it runs your ExApp’s main binary (or script).
+3. Add the following lines to your `Dockerfile` to automatically include the `FRP client` binaries in your Docker image:
+
+    ```bash
+    # Download and install FRP client
+    # TO-DO: adjust these urls to point to the Nextcloud org  repo after transfer.
+    RUN set -ex; \
+        ARCH=$(uname -m); \
+        if [ "$ARCH" = "aarch64" ]; then \
+          FRP_URL="https://github.com/fatedier/frp/releases/download/v0.61.1/frp_0.61.1_linux_arm64.tar.gz"; \
+        else \
+          FRP_URL="https://github.com/fatedier/frp/releases/download/v0.61.1/frp_0.61.1_linux_amd64.tar.gz"; \
+        fi; \
+        echo "Downloading FRP client from $FRP_URL"; \
+        curl -L "$FRP_URL" -o /tmp/frp.tar.gz; \
+        tar -C /tmp -xzf /tmp/frp.tar.gz; \
+        mv /tmp/frp_0.61.1_linux_* /tmp/frp; \
+        cp /tmp/frp/frpc /usr/local/bin/frpc; \
+        chmod +x /usr/local/bin/frpc; \
+        rm -rf /tmp/frp /tmp/frp.tar.gz
+    ```
+
+    > **Note:** For `Alpine 3.21` Linux you can just install `FRP` from repo using `apk add frp` command.
+
+That's it!
+
 ## Contributing
 
 Contributions to HaRP are welcome. Feel free to open issues, discussions or submit pull requests with improvements, bug fixes, or new features.
