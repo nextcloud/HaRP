@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+from enum import IntEnum
 from ipaddress import IPv4Address, IPv6Address
 
 import aiohttp
@@ -32,10 +33,15 @@ SPOA_AGENT = SpoaServer()
 # Definitions
 ###############################################################################
 
+class AccessLevel(IntEnum):
+    PUBLIC = 0
+    USER = 1
+    ADMIN = 2
+
 
 class ExAppRoute(BaseModel):
     url: str = Field(..., description="REGEX for URL, e.g. r'^api/w/nextcloud/jobs/.*'")
-    access_level: str = Field(..., description="ADMIN, USER, or PUBLIC")
+    access_level: AccessLevel = Field(..., description="ADMIN(2), USER(1), or PUBLIC(0)")
     bruteforce_protection: list[int] = Field([], description="e.g. [401, 403], etc.")
 
 
@@ -44,6 +50,11 @@ class ExApp(BaseModel):
     exapp_version: str = Field(...)
     port: int = Field(...)
     routes: list[ExAppRoute] = Field([])
+
+
+class NcUser(BaseModel):
+    user_id: str | None = Field(default=None)
+    access_level: AccessLevel = Field(..., description="ADMIN(2), USER(1), or PUBLIC(0)")
 
 
 ###############################################################################
@@ -186,8 +197,18 @@ async def exapps_msg(path: str, headers: str, client_ip):
         for route in exapp_record.routes:
             try:
                 if re.match(route.url, target_path):
-                    route_allowed = True  # TO-DO: we also need to implement access check(ADMIN, USER, PUBLIC)
-                    break
+                    if route.access_level == AccessLevel.PUBLIC:
+                        route_allowed = True
+                        break
+
+                    user = nc_get_user(request_headers)
+                    if route.access_level <= user.access_level:
+                        route_allowed = True
+                        break
+
+                    LOGGER.error("Access denied for %s to %s", user.user_id, target_path)
+                    await record_ip_failure(client_ip_str)
+                    return reply.set_txn_var("unauthorized", 1) # todo: or forbidden
             except re.error as err:
                 LOGGER.error("Invalid regex %s in route for exapp %s: %s", route.url, exapp_id, err)
 
@@ -243,6 +264,30 @@ async def nc_get_exapp(app_id: str) -> ExApp | None:
             raise Exception("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
         data = await resp.json()
         return ExApp.model_validate(data)
+
+
+USER_INFO_URL = f"{ \
+    NC_INSTANCE_URL.removesuffix('/').removesuffix('/index.php') \
+}/index.php/apps/app_api/harp/user-info"
+EXCLUDE_HEADERS_USER_INFO = {
+    "host": None
+}
+
+
+async def nc_get_user(all_headers: dict[str, str]) -> NcUser | None:
+    ext_headers = {k: v for k, v in all_headers.items() if k.lower() not in EXCLUDE_HEADERS_USER_INFO}
+    # todo
+    LOGGER.debug("all_headers = %s\next_headers = %s", str(all_headers), str(ext_headers))
+    async with aiohttp.ClientSession() as session, session.get(
+        EX_APP_URL, headers={"harp-shared-key": SHARED_KEY, **ext_headers}
+    ) as resp:
+        if not resp.ok:
+            LOGGER.debug("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
+            if resp.status // 100 == 4:
+                return None
+            raise Exception("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
+        data = await resp.json()
+        return NcUser.model_validate(data)
 
 
 ###############################################################################
