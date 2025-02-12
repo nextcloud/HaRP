@@ -8,6 +8,7 @@ import re
 import time
 from enum import IntEnum
 from base64 import b64encode
+from enum import IntEnum
 from ipaddress import IPv4Address, IPv6Address
 
 import aiohttp
