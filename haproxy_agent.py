@@ -16,7 +16,7 @@ from haproxyspoa.spoa_server import SpoaServer
 from pydantic import BaseModel, Field
 
 APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
-SHARED_KEY = os.environ.get("NC_HARP_SHARED_KEY")
+SHARED_KEY = os.environ.get("HP_SHARED_KEY")
 NC_INSTANCE_URL = os.environ.get("NC_INSTANCE_URL")
 # Set up the logging configuration
 LOG_LEVEL = os.environ["HP_LOG_LEVEL"].upper()

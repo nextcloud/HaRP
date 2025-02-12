@@ -14,13 +14,13 @@
 #     -e HP_EXAPPS_ADDRESS="0.0.0.0:8780" \
 #     -e HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781" \
 #     -e HP_FRP_ADDRESS="0.0.0.0:8782" \
-#     -e NC_HARP_SHARED_KEY="mysecret" \
+#     -e HP_SHARED_KEY="mysecret" \
 #     --name harp-prod \
 #     harp-prod
 #
 # NOTES:
 #  - If you mount /certs/cert.pem into the container, HTTPS frontend will be enabled.
-#  - NC_HARP_SHARED_KEY or NC_HARP_SHARED_KEY_FILE must be provided at runtime.
+#  - HP_SHARED_KEY or HP_SHARED_KEY_FILE must be provided at runtime.
 # -------------------------------------------------------------------------
 
 FROM haproxy:3.1.2-alpine3.21
@@ -39,7 +39,7 @@ ENV HP_EXAPPS_ADDRESS="0.0.0.0:8780" \
     NC_INSTANCE_URL="" \
     HP_LOG_LEVEL="warning"
 
-# NOTE: We do NOT define NC_HARP_SHARED_KEY or NC_HARP_SHARED_KEY_FILE here
+# NOTE: We do NOT define HP_SHARED_KEY or HP_SHARED_KEY_FILE here
 # because they must be provided at runtime for security reasons.
 
 RUN set -ex; \
