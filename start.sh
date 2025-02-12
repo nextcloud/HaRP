@@ -8,7 +8,7 @@ set -e
 # start.sh
 #  - Generates self-signed certificates for FRP Server and FRP Clients
 #  - Generates /haproxy.cfg from haproxy.cfg.template
-#  - Reads NC_HARP_SHARED_KEY or NC_HARP_SHARED_KEY_FILE
+#  - Reads HP_SHARED_KEY or HP_SHARED_KEY_FILE
 #  - Comments out HTTPS frontends if no /certs/cert.pem is found
 #  - Starts FRP server (frps) on HP_FRP_ADDRESS
 #  - Starts the Python SPOE agent on 127.0.0.1:9600
@@ -160,31 +160,31 @@ if [ -f "/haproxy.cfg" ]; then
 else
   log "INFO: Creating /haproxy.cfg from haproxy.cfg.template..."
 
-  if [ -n "$NC_HARP_SHARED_KEY_FILE" ] && [ ! -f "$NC_HARP_SHARED_KEY_FILE" ]; then
-    echo "ERROR: NC_HARP_SHARED_KEY_FILE is specified but the file does not exist."
+  if [ -n "$HP_SHARED_KEY_FILE" ] && [ ! -f "$HP_SHARED_KEY_FILE" ]; then
+    echo "ERROR: HP_SHARED_KEY_FILE is specified but the file does not exist."
     exit 1
   fi
 
-  if [ -n "$NC_HARP_SHARED_KEY" ] && [ -n "$NC_HARP_SHARED_KEY_FILE" ]; then
-    echo "ERROR: Only one of NC_HARP_SHARED_KEY or NC_HARP_SHARED_KEY_FILE should be specified."
+  if [ -n "$HP_SHARED_KEY" ] && [ -n "$HP_SHARED_KEY_FILE" ]; then
+    echo "ERROR: Only one of HP_SHARED_KEY or HP_SHARED_KEY_FILE should be specified."
     exit 1
   fi
 
-  if [ -n "$NC_HARP_SHARED_KEY_FILE" ]; then
-    if [ -s "$NC_HARP_SHARED_KEY_FILE" ]; then
-      NC_HARP_SHARED_KEY="$(cat "$NC_HARP_SHARED_KEY_FILE")"
+  if [ -n "$HP_SHARED_KEY_FILE" ]; then
+    if [ -s "$HP_SHARED_KEY_FILE" ]; then
+      HP_SHARED_KEY="$(cat "$HP_SHARED_KEY_FILE")"
     else
-      echo "ERROR: NC_HARP_SHARED_KEY_FILE is specified but is empty."
+      echo "ERROR: HP_SHARED_KEY_FILE is specified but is empty."
       exit 1
     fi
-  elif [ -n "$NC_HARP_SHARED_KEY" ]; then
-    NC_HARP_SHARED_KEY="${NC_HARP_SHARED_KEY}"
+  elif [ -n "$HP_SHARED_KEY" ]; then
+    HP_SHARED_KEY="${HP_SHARED_KEY}"
   else
-    echo "ERROR: Either NC_HARP_SHARED_KEY_FILE or NC_HARP_SHARED_KEY must be set."
+    echo "ERROR: Either HP_SHARED_KEY_FILE or HP_SHARED_KEY must be set."
     exit 1
   fi
 
-  export NC_HARP_SHARED_KEY
+  export HP_SHARED_KEY
 
   # Use envsubst to render the main configuration.
   envsubst < /haproxy.cfg.template > /haproxy.cfg
@@ -270,7 +270,7 @@ if [ -e "/var/run/docker.sock" ]; then
 cat <<EOF >/frpc-docker.toml
 serverAddr = "${LOCAL_FRP_HOST}"
 serverPort = ${FRP_PORT}
-metadatas.token = "${NC_HARP_SHARED_KEY}"
+metadatas.token = "${HP_SHARED_KEY}"
 transport.tls.certFile = "/certs/frp/client.crt"
 transport.tls.keyFile = "/certs/frp/client.key"
 transport.tls.trustedCaFile = "/certs/frp/ca.crt"
@@ -287,7 +287,7 @@ EOF
 cat <<EOF >/frpc-docker.toml
 serverAddr = "${LOCAL_FRP_HOST}"
 serverPort = ${FRP_PORT}
-metadatas.token = "${NC_HARP_SHARED_KEY}"
+metadatas.token = "${HP_SHARED_KEY}"
 
 [[proxies]]
 remotePort = 24000

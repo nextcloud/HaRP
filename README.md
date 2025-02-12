@@ -43,7 +43,7 @@ HaRP should be deployed where your reverse proxy (NGINX, Caddy, Traefik, etc.) c
 
 ```bash
 docker run \
-  -e NC_HARP_SHARED_KEY="some_very_secure_password" \
+  -e HP_SHARED_KEY="some_very_secure_password" \
   -e NC_INSTANCE_URL="http://nextcloud.local" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
@@ -59,7 +59,7 @@ For even faster communication by avoiding internal network routing, you can use 
 
 ```bash
 docker run \
-  -e NC_HARP_SHARED_KEY="some_very_secure_password" \
+  -e HP_SHARED_KEY="some_very_secure_password" \
   -e NC_INSTANCE_URL="http://nextcloud.local" \
   -e HP_EXAPPS_ADDRESS="192.168.2.5:8780" \
   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -68,7 +68,7 @@ docker run \
   -d nextcloud-appapi-dsp:harp
 ```
 
-> **Warning:** Do not forget to change the **NC_HARP_SHARED_KEY** value to a secure one!
+> **Warning:** Do not forget to change the **HP_SHARED_KEY** value to a secure one!
 
 ---
 
@@ -138,7 +138,7 @@ HaRP is configured via several environment variables. Here are the key variables
   - **Default:** `HP_FRP_ADDRESS="0.0.0.0:8782"`
   - **Note:** Should be accessible from where your ExApps are running.
 
-- **`NC_HARP_SHARED_KEY`** (or **`NC_HARP_SHARED_KEY_FILE`**)
+- **`HP_SHARED_KEY`** (or **`HP_SHARED_KEY_FILE`**)
   - **Description:** A secret token used for authentication between services.
   - **Requirement:** Must be set at runtime. Use only one of these methods.
 
