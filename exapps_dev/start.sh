@@ -5,15 +5,15 @@ set -e
 if [ -f /frpc.toml ]; then
     echo "/frpc.toml already exists, skipping creation."
 else
-    # Only create a config file if NC_HARP_SHARED_KEY is set.
-    if [ -n "$NC_HARP_SHARED_KEY" ]; then
-        echo "NC_HARP_SHARED_KEY is set, creating /frpc.toml configuration file..."
+    # Only create a config file if HP_SHARED_KEY is set.
+    if [ -n "$HP_SHARED_KEY" ]; then
+        echo "HP_SHARED_KEY is set, creating /frpc.toml configuration file..."
         if [ -d "/certs/frp" ]; then
             echo "Found /certs/frp directory. Creating configuration with TLS certificates."
             cat <<EOF > /frpc.toml
-serverAddr = "$NC_HARP_FRP_ADDRESS"
-serverPort = $NC_HARP_FRP_PORT
-metadatas.token = "$NC_HARP_SHARED_KEY"
+serverAddr = "$HP_FRP_ADDRESS"
+serverPort = $HP_FRP_PORT
+metadatas.token = $HP_SHARED_KEY
 transport.tls.certFile = "/certs/frp/client.crt"
 transport.tls.keyFile = "/certs/frp/client.key"
 transport.tls.trustedCaFile = "/certs/frp/ca.crt"
@@ -28,9 +28,9 @@ EOF
         else
             echo "Directory /certs/frp not found. Creating configuration without TLS certificates."
             cat <<EOF > /frpc.toml
-serverAddr = "$NC_HARP_FRP_ADDRESS"
-serverPort = $NC_HARP_FRP_PORT
-metadatas.token = "$NC_HARP_SHARED_KEY"
+serverAddr = "$HP_FRP_ADDRESS"
+serverPort = $HP_FRP_PORT
+metadatas.token = $HP_SHARED_KEY
 
 [[proxies]]
 name = "exapp"
@@ -41,12 +41,12 @@ remotePort = $APP_PORT
 EOF
         fi
     else
-        echo "NC_HARP_SHARED_KEY is not set. Skipping FRP configuration."
+        echo "HP_SHARED_KEY is not set. Skipping FRP configuration."
     fi
 fi
 
 # If we have a configuration file and the shared key is present, start the FRP client
-if [ -f /frpc.toml ] && [ -n "$NC_HARP_SHARED_KEY" ]; then
+if [ -f /frpc.toml ] && [ -n "$HP_SHARED_KEY" ]; then
     echo "Starting frpc in the background..."
     frpc -c /frpc.toml &
 fi
