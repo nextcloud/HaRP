@@ -39,6 +39,7 @@ frontend ex_apps
     filter spoe engine exapps-spoe config /etc/haproxy/spoe-agent.conf
     http-request silent-drop if { var(txn.exapps.bad_request) -m int eq 1 }
     http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.exapps.unauthorized) -m int eq 1 }
+    http-request return status 403 content-type text/plain string "403 Forbidden" if { var(txn.exapps.forbidden) -m int eq 1 }
     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
     use_backend %[var(txn.exapps.backend)]
 
@@ -62,6 +63,7 @@ _HTTPS_FRONTEND_     bind ${HP_EXAPPS_HTTPS_ADDRESS} ssl crt /certs/cert.pem
 _HTTPS_FRONTEND_     filter spoe engine exapps-spoe config /etc/haproxy/spoe-agent.conf
 _HTTPS_FRONTEND_     http-request silent-drop if { var(txn.exapps.bad_request) -m int eq 1 }
 _HTTPS_FRONTEND_     http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.exapps.unauthorized) -m int eq 1 }
+_HTTPS_FRONTEND_     http-request return status 403 content-type text/plain string "403 Forbidden" if { var(txn.exapps.forbidden) -m int eq 1 }
 _HTTPS_FRONTEND_     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
 _HTTPS_FRONTEND_     use_backend %[var(txn.exapps.backend)]
 
