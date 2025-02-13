@@ -43,17 +43,6 @@ frontend ex_apps
     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
     use_backend %[var(txn.exapps.backend)]
 
-backend ex_apps_backend
-    mode http
-    server frp_server 127.0.0.1
-    http-request set-path %[var(txn.exapps.target_path)]
-    http-request set-dst-port var(txn.exapps.target_port)
-    http-request set-header EX-APP-ID %[var(txn.exapps.exapp_id)]
-    http-request set-header EX-APP-VERSION %[var(txn.exapps.exapp_version)]
-    http-request set-header AUTHORIZATION-APP-API %[var(txn.exapps.exapp_token)]
-    http-request set-header AA-VERSION "32"  # TO-DO: temporary, remove it after we update all ExApps.
-    filter spoe engine exapps-spoe config /etc/haproxy/spoe-agent.conf
-
 ###############################################################################
 # FRONTEND: ex_apps_https (only enabled if /certs/cert.pem exists)
 ###############################################################################
@@ -67,6 +56,30 @@ _HTTPS_FRONTEND_     http-request return status 401 content-type text/plain stri
 _HTTPS_FRONTEND_     http-request return status 403 content-type text/plain string "403 Forbidden" if { var(txn.exapps.forbidden) -m int eq 1 }
 _HTTPS_FRONTEND_     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
 _HTTPS_FRONTEND_     use_backend %[var(txn.exapps.backend)]
+
+###############################################################################
+# BACKENDS: ex_apps & ex_apps_backend_w_bruteforce
+###############################################################################
+backend ex_apps_backend
+    mode http
+    server frp_server 127.0.0.1
+    http-request set-path %[var(txn.exapps.target_path)]
+    http-request set-dst-port var(txn.exapps.target_port)
+    http-request set-header EX-APP-ID %[var(txn.exapps.exapp_id)]
+    http-request set-header EX-APP-VERSION %[var(txn.exapps.exapp_version)]
+    http-request set-header AUTHORIZATION-APP-API %[var(txn.exapps.exapp_token)]
+    http-request set-header AA-VERSION "32"  # TO-DO: temporary, remove it after we update all ExApps.
+
+backend ex_apps_backend_w_bruteforce
+    mode http
+    server frp_server 127.0.0.1
+    http-request set-path %[var(txn.exapps.target_path)]
+    http-request set-dst-port var(txn.exapps.target_port)
+    http-request set-header EX-APP-ID %[var(txn.exapps.exapp_id)]
+    http-request set-header EX-APP-VERSION %[var(txn.exapps.exapp_version)]
+    http-request set-header AUTHORIZATION-APP-API %[var(txn.exapps.exapp_token)]
+    http-request set-header AA-VERSION "32"  # TO-DO: temporary, remove it after we update all ExApps.
+    filter spoe engine exapps-bruteforce-protection-spoe config /etc/haproxy/spoe-agent.conf
 
 ###############################################################################
 # BACKEND: nextcloud_control (HTTP)

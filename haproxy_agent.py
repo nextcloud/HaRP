@@ -158,6 +158,7 @@ async def exapps_msg(
     if exapp_id == "app_api":
         return await handle_app_api_request(target_path, request_headers, client_ip_str, reply)
 
+    exapp_route_bruteforce_protection = None
     authorization_app_api = ""
     exapp_record = None
     if all(
@@ -221,14 +222,12 @@ async def exapps_msg(
             try:
                 if re.match(route.url, target_path):
                     if route.access_level == AccessLevel.PUBLIC:
-                        if route.str_bruteforce_protection:
-                            reply = reply.set_txn_var("statuses_to_trigger_bp", route.str_bruteforce_protection)
+                        exapp_route_bruteforce_protection = route.str_bruteforce_protection
                         route_allowed = True
                         break
 
                     if nc_user and route.access_level <= nc_user.access_level:
-                        if route.str_bruteforce_protection:
-                            reply = reply.set_txn_var("statuses_to_trigger_bp", route.str_bruteforce_protection)
+                        exapp_route_bruteforce_protection = route.str_bruteforce_protection
                         route_allowed = True
                         break
 
@@ -247,8 +246,13 @@ async def exapps_msg(
         user_id = nc_user.user_id if nc_user else ""
         authorization_app_api = b64encode(f"{user_id}:{exapp_record.exapp_token}".encode(errors="ignore"))
 
+    if exapp_route_bruteforce_protection:
+        reply = reply.set_txn_var("statuses_to_trigger_bp", exapp_route_bruteforce_protection)
+        reply = reply.set_txn_var("backend", "ex_apps_backend_w_bruteforce")
+    else:
+        reply = reply.set_txn_var("backend", "ex_apps_backend")
+
     LOGGER.info("Rerouting request to %s:%s", target_path, exapp_record.port)
-    reply = reply.set_txn_var("backend", "ex_apps_backend")
     reply = reply.set_txn_var("target_port", exapp_record.port)
     reply = reply.set_txn_var("exapp_token", authorization_app_api)
     reply = reply.set_txn_var("exapp_version", exapp_record.exapp_version)
