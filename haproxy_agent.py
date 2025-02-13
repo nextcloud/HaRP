@@ -127,7 +127,7 @@ async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
 
 
 @SPOA_AGENT.handler("exapps_msg")
-async def exapps_msg(path: str, headers: str, client_ip):
+async def exapps_msg(path: str, headers: str, client_ip: str, pass_cookie: str) -> AckPayload:
     client_ip_str = str(client_ip)
     reply = AckPayload()
     LOGGER.debug("Incoming request to ExApp: path=%s, headers=%s, ip=%s", path, headers, client_ip_str)
@@ -203,20 +203,24 @@ async def exapps_msg(path: str, headers: str, client_ip):
             return reply.set_txn_var("bad_request", 1)
         route_allowed = True  # this is internal ExApp endpoint and request comes from AppAPI
     else:
-        if not request_headers.get("oc_sessionpassphrase"):
-            LOGGER.error("No session passphrase found in headers.")
+        if not pass_cookie:
+            LOGGER.error("No session passphrase found in cookies.")
             await record_ip_failure(client_ip_str)
             return reply.set_txn_var("unauthorized", 1)
 
         async with SESSION_CACHE_LOCK:
-            user = SESSION_CACHE.get(request_headers["oc_sessionpassphrase"])
+            user = SESSION_CACHE.get(pass_cookie)
             if not user:
-                user = await nc_get_user(request_headers)
-                if not user:
-                    LOGGER.error("No user found for session passphrase.")
-                    await record_ip_failure(client_ip_str)
+                try:
+                    user = await nc_get_user(request_headers)
+                    if not user:
+                        LOGGER.error("No user found for session passphrase.")
+                        await record_ip_failure(client_ip_str)
+                        return reply.set_txn_var("unauthorized", 1)
+                except Exception as e:
+                    LOGGER.exception("Failed to fetch user info from Nextcloud", exc_info=e)
                     return reply.set_txn_var("unauthorized", 1)
-                SESSION_CACHE[request_headers["oc_sessionpassphrase"]] = user
+                SESSION_CACHE[pass_cookie] = user
 
         for route in exapp_record.routes:
             try:
@@ -287,13 +291,11 @@ async def nc_get_exapp(app_id: str) -> ExApp | None:
 
 async def nc_get_user(all_headers: dict[str, str]) -> NcUser | None:
     ext_headers = {k: v for k, v in all_headers.items() if k.lower() not in EXCLUDE_HEADERS_USER_INFO}
-    # todo
-    LOGGER.debug("all_headers = %s\next_headers = %s", str(all_headers), str(ext_headers))
     async with aiohttp.ClientSession() as session, session.get(
-        USER_INFO_URL, headers={"harp-shared-key": SHARED_KEY, **ext_headers}
+        USER_INFO_URL, headers={**ext_headers, "harp-shared-key": SHARED_KEY},
     ) as resp:
         if not resp.ok:
-            LOGGER.debug("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
+            LOGGER.info("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
             if resp.status // 100 == 4:
                 return None
             raise Exception("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
