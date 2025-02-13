@@ -7,6 +7,7 @@ import os
 import re
 import time
 from enum import IntEnum
+from base64 import b64encode
 from ipaddress import IPv4Address, IPv6Address
 
 import aiohttp
@@ -151,23 +152,22 @@ async def exapps_msg(path: str, headers: str, client_ip):
             return reply.set_txn_var("backend", "docker_engine_backend")
         return reply.set_txn_var("backend", "nextcloud_control_backend")
 
-    nextcloud_direct_request = False
+    authorization_app_api = ""
     exapp_record = None
     if all(
         key in request_headers
         for key in ["ex-app-version", "ex-app-id", "ex-app-port", "authorization-app-api", "harp-shared-key"]
     ):
         # This is a direct request from AppAPI to ExApp using AppAPI PHP functions "requestToExAppXXX"
-        if request_headers["harp-shared-key"] == SHARED_KEY:
-            nextcloud_direct_request = True
-            exapp_record = ExApp(
-                exapp_token=request_headers["authorization-app-api"],
-                exapp_version=request_headers["ex-app-version"],
-                port=int(request_headers["ex-app-port"]),
-            )
-        else:
+        if request_headers["harp-shared-key"] != SHARED_KEY:
             await record_ip_failure(client_ip)
             return reply.set_txn_var("bad_request", 1)
+        exapp_record = ExApp(
+            exapp_token="",
+            exapp_version=request_headers["ex-app-version"],
+            port=int(request_headers["ex-app-port"]),
+        )
+        authorization_app_api = request_headers["authorization-app-api"]
 
     if not exapp_record:
         async with EXAPP_CACHE_LOCK:
@@ -189,7 +189,8 @@ async def exapps_msg(path: str, headers: str, client_ip):
 
     route_allowed = False
     if target_path in ("/heartbeat", "/init", "/enabled"):
-        if not nextcloud_direct_request:
+        if not authorization_app_api:
+            LOGGER.error("Only requests from AppAPI allowed to the internal endpoints.")
             await record_ip_failure(client_ip_str)
             return reply.set_txn_var("bad_request", 1)
         route_allowed = True  # this is internal ExApp endpoint and request comes from AppAPI
@@ -217,10 +218,15 @@ async def exapps_msg(path: str, headers: str, client_ip):
         await record_ip_failure(client_ip_str)
         return reply.set_txn_var("not_found", 1)
 
+    if not authorization_app_api:
+        # TO-DO: for proper encoding we should pass user_id here
+        user_id = ""
+        authorization_app_api = b64encode(f"{user_id}:{exapp_record.exapp_token}".encode(errors="ignore"))
+
     LOGGER.info("Rerouting request to %s:%s", target_path, exapp_record.port)
     reply = reply.set_txn_var("backend", "ex_apps_backend")
     reply = reply.set_txn_var("target_port", exapp_record.port)
-    reply = reply.set_txn_var("exapp_token", exapp_record.exapp_token)
+    reply = reply.set_txn_var("exapp_token", authorization_app_api)
     reply = reply.set_txn_var("exapp_version", exapp_record.exapp_version)
     return reply.set_txn_var("exapp_id", exapp_id)
 
