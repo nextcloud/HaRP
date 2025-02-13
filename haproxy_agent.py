@@ -2,6 +2,7 @@
 
 import asyncio
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -9,13 +10,13 @@ import time
 from base64 import b64encode
 from enum import IntEnum
 from ipaddress import IPv4Address, IPv6Address
+from typing import Self
 
 import aiohttp
-import pydantic
 from aiohttp import web
 from haproxyspoa.payloads.ack import AckPayload
 from haproxyspoa.spoa_server import SpoaServer
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
 SHARED_KEY = os.environ.get("HP_SHARED_KEY")
@@ -47,9 +48,19 @@ class AccessLevel(IntEnum):
 
 
 class ExAppRoute(BaseModel):
-    url: str = Field(..., description="REGEX for URL, e.g. r'^api/w/nextcloud/jobs/.*'")
+    url: str = Field(..., description="REGEX for URL, e.g. r'^/private/.*'")
     access_level: AccessLevel = Field(..., description="ADMIN(2), USER(1), or PUBLIC(0)")
-    bruteforce_protection: list[int] = Field([], description="e.g. [401, 403], etc.")
+    bruteforce_protection: list[int] = Field(
+        [], description="List with HTTP statuses to trigger the bruteforce protection."
+    )
+    str_bruteforce_protection: str = Field(
+        "", description="Private field, that will be automatically initialized from the 'bruteforce_protection' value."
+    )
+
+    @model_validator(mode="after")
+    def encode_bruteforce_protection_values(self) -> Self:
+        self.str_bruteforce_protection = json.dumps(self.bruteforce_protection) if self.bruteforce_protection else ""
+        return self
 
 
 class ExApp(BaseModel):
@@ -119,7 +130,9 @@ async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
 
 
 @SPOA_AGENT.handler("exapps_msg")
-async def exapps_msg(path: str, headers: str, client_ip: str, pass_cookie: str) -> AckPayload:
+async def exapps_msg(
+    path: str, headers: str, client_ip: ipaddress.IPv4Address | ipaddress.IPv6Address, pass_cookie: str
+) -> AckPayload:
     client_ip_str = str(client_ip)
     reply = AckPayload()
     LOGGER.debug("Incoming request to ExApp: path=%s, headers=%s, ip=%s", path, headers, client_ip_str)
@@ -140,17 +153,10 @@ async def exapps_msg(path: str, headers: str, client_ip: str, pass_cookie: str) 
     reply = reply.set_txn_var("target_path", target_path)
 
     request_headers = parse_headers(headers)
+
+    # Special handling for AppAPI requests
     if exapp_id == "app_api":
-        LOGGER.debug("Request from AppAPI received: %s", target_path)
-        # Special case: AppAPI can send requests to control this Agent
-        if request_headers.get("harp-shared-key") != SHARED_KEY:
-            await record_ip_failure(client_ip)
-            return reply.set_txn_var("unauthorized", 1)
-        docker_engine_port = request_headers.get("docker-engine-port")
-        if docker_engine_port:
-            reply = reply.set_txn_var("target_port", int(docker_engine_port))
-            return reply.set_txn_var("backend", "docker_engine_backend")
-        return reply.set_txn_var("backend", "nextcloud_control_backend")
+        return await handle_app_api_request(target_path, request_headers, client_ip_str, reply)
 
     authorization_app_api = ""
     exapp_record = None
@@ -215,10 +221,14 @@ async def exapps_msg(path: str, headers: str, client_ip: str, pass_cookie: str) 
             try:
                 if re.match(route.url, target_path):
                     if route.access_level == AccessLevel.PUBLIC:
+                        if route.str_bruteforce_protection:
+                            reply = reply.set_txn_var("statuses_to_trigger_bp", route.str_bruteforce_protection)
                         route_allowed = True
                         break
 
                     if nc_user and route.access_level <= nc_user.access_level:
+                        if route.str_bruteforce_protection:
+                            reply = reply.set_txn_var("statuses_to_trigger_bp", route.str_bruteforce_protection)
                         route_allowed = True
                         break
 
@@ -245,9 +255,43 @@ async def exapps_msg(path: str, headers: str, client_ip: str, pass_cookie: str) 
     return reply.set_txn_var("exapp_id", exapp_id)
 
 
+@SPOA_AGENT.handler("exapps_response_status_msg")
+async def exapps_response_status_msg(
+    status: int, client_ip: ipaddress.IPv4Address | ipaddress.IPv6Address, statuses_to_trigger_bp: str
+) -> AckPayload:
+    reply = AckPayload()
+    if not statuses_to_trigger_bp:
+        return reply.set_txn_var("bp_triggered", 0)
+    statuses = json.loads(statuses_to_trigger_bp)
+    if status not in statuses:
+        return reply.set_txn_var("bp_triggered", 0)
+    str_client_ip = str(client_ip)
+    LOGGER.warning("Bruteforce protection(status=%s) triggered IP=%s.", status, str_client_ip)
+    await record_ip_failure(str_client_ip)
+    return reply.set_txn_var("bp_triggered", 1)
+
+
 ###############################################################################
 # Helper functions
 ###############################################################################
+
+
+async def handle_app_api_request(
+    target_path: str,
+    request_headers: dict[str, str],
+    str_client_ip: str,
+    reply: AckPayload,
+) -> AckPayload:
+    """Handle the special case where the ExApp ID is 'app_api'."""
+    LOGGER.debug("Request from AppAPI received: %s", target_path)
+    if request_headers.get("harp-shared-key") != SHARED_KEY:
+        await record_ip_failure(str_client_ip)
+        return reply.set_txn_var("unauthorized", 1)
+    docker_engine_port = request_headers.get("docker-engine-port")
+    if docker_engine_port:
+        reply = reply.set_txn_var("target_port", int(docker_engine_port))
+        return reply.set_txn_var("backend", "docker_engine_backend")
+    return reply.set_txn_var("backend", "nextcloud_control_backend")
 
 
 def parse_headers(headers_str: str) -> dict[str, str]:
@@ -285,7 +329,8 @@ async def nc_get_user(all_headers: dict[str, str]) -> NcUser | None:
     ext_headers = {k: v for k, v in all_headers.items() if k.lower() not in EXCLUDE_HEADERS_USER_INFO}
     LOGGER.debug("all_headers = %s\next_headers = %s", str(all_headers), str(ext_headers))
     async with aiohttp.ClientSession() as session, session.get(
-        USER_INFO_URL, headers={**ext_headers, "harp-shared-key": SHARED_KEY},
+        USER_INFO_URL,
+        headers={**ext_headers, "harp-shared-key": SHARED_KEY},
     ) as resp:
         if not resp.ok:
             LOGGER.info("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
