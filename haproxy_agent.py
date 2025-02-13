@@ -7,6 +7,7 @@ import os
 import re
 import time
 from base64 import b64encode
+from enum import IntEnum
 from ipaddress import IPv4Address, IPv6Address
 
 import aiohttp
@@ -14,7 +15,7 @@ import pydantic
 from aiohttp import web
 from haproxyspoa.payloads.ack import AckPayload
 from haproxyspoa.spoa_server import SpoaServer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
 SHARED_KEY = os.environ.get("HP_SHARED_KEY")
@@ -27,6 +28,11 @@ LOGGER.setLevel(level=LOG_LEVEL)
 logging.getLogger("haproxyspoa").setLevel(level=LOG_LEVEL)
 logging.getLogger("aiohttp").setLevel(level=LOG_LEVEL)
 
+NC_REQ_URL = NC_INSTANCE_URL.removesuffix("/").removesuffix("/index.php")
+EX_APP_URL = f"{NC_REQ_URL}/index.php/apps/app_api/harp/exapp-meta"
+USER_INFO_URL = f"{NC_REQ_URL}/index.php/apps/app_api/harp/user-info"
+EXCLUDE_HEADERS_USER_INFO = {"host": None}
+
 SPOA_AGENT = SpoaServer()
 
 ###############################################################################
@@ -34,9 +40,15 @@ SPOA_AGENT = SpoaServer()
 ###############################################################################
 
 
+class AccessLevel(IntEnum):
+    PUBLIC = 0
+    USER = 1
+    ADMIN = 2
+
+
 class ExAppRoute(BaseModel):
     url: str = Field(..., description="REGEX for URL, e.g. r'^api/w/nextcloud/jobs/.*'")
-    access_level: str = Field(..., description="ADMIN, USER, or PUBLIC")
+    access_level: AccessLevel = Field(..., description="ADMIN(2), USER(1), or PUBLIC(0)")
     bruteforce_protection: list[int] = Field([], description="e.g. [401, 403], etc.")
 
 
@@ -47,6 +59,11 @@ class ExApp(BaseModel):
     routes: list[ExAppRoute] = Field([])
 
 
+class NcUser(BaseModel):
+    user_id: str = Field("", description="The Nextcloud user ID if not an anonymous user.")
+    access_level: AccessLevel = Field(..., description="ADMIN(2), USER(1), or PUBLIC(0)")
+
+
 ###############################################################################
 # In-memory caches
 ###############################################################################
@@ -55,14 +72,8 @@ EXAPP_CACHE_LOCK = asyncio.Lock()
 EXAPP_CACHE: dict[str, ExApp] = {}
 
 SESSION_CACHE_LOCK = asyncio.Lock()
-SESSION_CACHE: dict[str, dict[str, str]] = {}
-"""
-Example of SESSION_CACHE[session_passphrase]:
-{
-  "user_id": str,
-  "access_level": str  # "ADMIN", "USER", "PUBLIC"
-}
-"""
+SESSION_CACHE: dict[str, NcUser] = {}
+# TO-DO: what to use here? "oc_sessionPassphrase" (seems deprecated) or "nc_token" (not present for anon users)
 
 BLACKLIST_CACHE_LOCK = asyncio.Lock()
 BLACKLIST_CACHE: dict[str, list[float]] = {}  # ip_str -> list of timestamps of failures
@@ -108,7 +119,7 @@ async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
 
 
 @SPOA_AGENT.handler("exapps_msg")
-async def exapps_msg(path: str, headers: str, client_ip):
+async def exapps_msg(path: str, headers: str, client_ip: str, pass_cookie: str) -> AckPayload:
     client_ip_str = str(client_ip)
     reply = AckPayload()
     LOGGER.debug("Incoming request to ExApp: path=%s, headers=%s, ip=%s", path, headers, client_ip_str)
@@ -169,7 +180,7 @@ async def exapps_msg(path: str, headers: str, client_ip):
                         await record_ip_failure(client_ip_str)
                         return reply.set_txn_var("not_found", 1)
                     EXAPP_CACHE[exapp_id_lower] = exapp_record
-                except pydantic.ValidationError as e:
+                except ValidationError as e:
                     LOGGER.error("Invalid ExApp metadata from Nextcloud: %s", e)
                     return reply.set_txn_var("not_found", 1)
                 except Exception as e:
@@ -184,11 +195,36 @@ async def exapps_msg(path: str, headers: str, client_ip):
             return reply.set_txn_var("bad_request", 1)
         route_allowed = True  # this is internal ExApp endpoint and request comes from AppAPI
     else:
+        nc_user = None
+        if pass_cookie:
+            async with SESSION_CACHE_LOCK:
+                nc_user = SESSION_CACHE.get(pass_cookie)
+                if not nc_user:
+                    try:
+                        nc_user = await nc_get_user(request_headers)
+                        if nc_user:
+                            SESSION_CACHE[pass_cookie] = nc_user
+                    except ValidationError as e:
+                        LOGGER.error("Invalid user info from Nextcloud: %s", e)
+                        return reply.set_txn_var("unauthorized", 1)
+                    except Exception as e:
+                        LOGGER.exception("Failed to fetch user info from Nextcloud", exc_info=e)
+                        return reply.set_txn_var("unauthorized", 1)
+
         for route in exapp_record.routes:
             try:
                 if re.match(route.url, target_path):
-                    route_allowed = True  # TO-DO: we also need to implement access check(ADMIN, USER, PUBLIC)
-                    break
+                    if route.access_level == AccessLevel.PUBLIC:
+                        route_allowed = True
+                        break
+
+                    if nc_user and route.access_level <= nc_user.access_level:
+                        route_allowed = True
+                        break
+
+                    LOGGER.error("Access denied for '%s' to %s", nc_user.user_id if nc_user else "", target_path)
+                    await record_ip_failure(client_ip_str)
+                    return reply.set_txn_var("forbidden", 1)
             except re.error as err:
                 LOGGER.error("Invalid regex %s in route for exapp %s: %s", route.url, exapp_id, err)
 
@@ -198,8 +234,7 @@ async def exapps_msg(path: str, headers: str, client_ip):
         return reply.set_txn_var("not_found", 1)
 
     if not authorization_app_api:
-        # TO-DO: for proper encoding we should pass user_id here
-        user_id = ""
+        user_id = nc_user.user_id if nc_user else ""
         authorization_app_api = b64encode(f"{user_id}:{exapp_record.exapp_token}".encode(errors="ignore"))
 
     LOGGER.info("Rerouting request to %s:%s", target_path, exapp_record.port)
@@ -234,11 +269,6 @@ def parse_headers(headers_str: str) -> dict[str, str]:
     return headers
 
 
-EX_APP_URL = f"{ \
-    NC_INSTANCE_URL.removesuffix('/').removesuffix('/index.php') \
-}/index.php/apps/app_api/harp/exapp-meta"
-
-
 async def nc_get_exapp(app_id: str) -> ExApp | None:
     async with aiohttp.ClientSession() as session, session.get(
         EX_APP_URL, headers={"harp-shared-key": SHARED_KEY}, params={"appId": app_id}
@@ -251,6 +281,21 @@ async def nc_get_exapp(app_id: str) -> ExApp | None:
         return ExApp.model_validate(data)
 
 
+async def nc_get_user(all_headers: dict[str, str]) -> NcUser | None:
+    ext_headers = {k: v for k, v in all_headers.items() if k.lower() not in EXCLUDE_HEADERS_USER_INFO}
+    LOGGER.debug("all_headers = %s\next_headers = %s", str(all_headers), str(ext_headers))
+    async with aiohttp.ClientSession() as session, session.get(
+        USER_INFO_URL, headers={**ext_headers, "harp-shared-key": SHARED_KEY},
+    ) as resp:
+        if not resp.ok:
+            LOGGER.info("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
+            if resp.status // 100 == 4:
+                return None
+            raise Exception("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
+        data = await resp.json()
+        return NcUser.model_validate(data)
+
+
 ###############################################################################
 # ExApp routes
 ###############################################################################
@@ -258,12 +303,12 @@ async def nc_get_exapp(app_id: str) -> ExApp | None:
 
 async def add_exapp(request: web.Request):
     data = await request.json()
-    if not isinstance(data, dict):
-        raise web.HTTPBadRequest()
-
     # Overwrite if already exists
     async with EXAPP_CACHE_LOCK:
-        EXAPP_CACHE[request.match_info["app_id"].lower()] = ExApp.model_validate(data)
+        try:
+            EXAPP_CACHE[request.match_info["app_id"].lower()] = ExApp.model_validate(data)
+        except ValidationError:
+            raise web.HTTPBadRequest() from None
     return web.HTTPNoContent()
 
 
@@ -282,20 +327,18 @@ async def delete_exapp(request: web.Request):
 
 async def add_session(request: web.Request):
     data = await request.json()
-    if not isinstance(data, dict):
-        raise web.HTTPBadRequest()
-    if "user_id" not in data or not isinstance(data["user_id"], str):
-        raise web.HTTPBadRequest()
-    if "access_level" not in data or data["access_level"] not in ["ADMIN", "USER", "PUBLIC"]:
-        raise web.HTTPBadRequest()
-
     # Overwrite if already exists
-    SESSION_CACHE[request.match_info["passphrase"]] = data
+    async with SESSION_CACHE_LOCK:
+        try:
+            SESSION_CACHE[request.match_info["passphrase"]] = NcUser.model_validate(data)
+        except ValidationError:
+            raise web.HTTPBadRequest() from None
     return web.HTTPNoContent()
 
 
 async def delete_session(request: web.Request):
-    old = SESSION_CACHE.pop(request.match_info["passphrase"], None)
+    async with SESSION_CACHE_LOCK:
+        old = SESSION_CACHE.pop(request.match_info["passphrase"], None)
     if old is None:
         raise web.HTTPNotFound()
     return web.HTTPNoContent()
