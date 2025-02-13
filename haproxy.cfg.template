@@ -50,6 +50,7 @@ backend ex_apps_backend
     http-request set-header EX-APP-ID %[var(txn.exapps.exapp_id)]
     http-request set-header EX-APP-VERSION %[var(txn.exapps.exapp_version)]
     http-request set-header AUTHORIZATION-APP-API %[var(txn.exapps.exapp_token)]
+    http-request set-header AA-VERSION "32"  # TO-DO: temporary, remove it after we update all ExApps.
 
 ###############################################################################
 # FRONTEND: ex_apps_https (only enabled if /certs/cert.pem exists)
