@@ -6,7 +6,6 @@ import logging
 import os
 import re
 import time
-from enum import IntEnum
 from base64 import b64encode
 from enum import IntEnum
 from ipaddress import IPv4Address, IPv6Address
@@ -28,6 +27,13 @@ LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(level=LOG_LEVEL)
 logging.getLogger("haproxyspoa").setLevel(level=LOG_LEVEL)
 logging.getLogger("aiohttp").setLevel(level=LOG_LEVEL)
+
+NC_REQ_URL = NC_INSTANCE_URL.removesuffix("/").removesuffix("/index.php")
+EX_APP_URL = f"{NC_REQ_URL}/index.php/apps/app_api/harp/exapp-meta"
+USER_INFO_URL = f"{NC_REQ_URL}/index.php/apps/app_api/harp/user-info"
+EXCLUDE_HEADERS_USER_INFO = {
+    "host": None
+}
 
 SPOA_AGENT = SpoaServer()
 
@@ -67,12 +73,13 @@ EXAPP_CACHE_LOCK = asyncio.Lock()
 EXAPP_CACHE: dict[str, ExApp] = {}
 
 SESSION_CACHE_LOCK = asyncio.Lock()
-SESSION_CACHE: dict[str, dict[str, str]] = {}
+SESSION_CACHE: dict[str, NcUser] = {}
+# todo: what to use here? "oc_sessionPassphrase" (seems deprecated) or "nc_token" (not present for anon users)
 """
 Example of SESSION_CACHE[session_passphrase]:
 {
-  "user_id": str,
-  "access_level": str  # "ADMIN", "USER", "PUBLIC"
+  "user_id": str | None,
+  "access_level": AccessLevel  # "ADMIN"(2), "USER"(1), "PUBLIC"(0)
 }
 """
 
@@ -196,14 +203,24 @@ async def exapps_msg(path: str, headers: str, client_ip):
             return reply.set_txn_var("bad_request", 1)
         route_allowed = True  # this is internal ExApp endpoint and request comes from AppAPI
     else:
+        if not request_headers.get("oc_sessionpassphrase"):
+            LOGGER.error("No session passphrase found in headers.")
+            await record_ip_failure(client_ip_str)
+            return reply.set_txn_var("unauthorized", 1)
+
+        async with SESSION_CACHE_LOCK:
+            user = SESSION_CACHE.get(request_headers["oc_sessionpassphrase"])
+            if not user:
+                user = await nc_get_user(request_headers)
+                if not user:
+                    LOGGER.error("No user found for session passphrase.")
+                    await record_ip_failure(client_ip_str)
+                    return reply.set_txn_var("unauthorized", 1)
+                SESSION_CACHE[request_headers["oc_sessionpassphrase"]] = user
+
         for route in exapp_record.routes:
             try:
                 if re.match(route.url, target_path):
-                    if route.access_level == AccessLevel.PUBLIC:
-                        route_allowed = True
-                        break
-
-                    user = nc_get_user(request_headers)
                     if route.access_level <= user.access_level:
                         route_allowed = True
                         break
@@ -256,11 +273,6 @@ def parse_headers(headers_str: str) -> dict[str, str]:
     return headers
 
 
-EX_APP_URL = f"{ \
-    NC_INSTANCE_URL.removesuffix('/').removesuffix('/index.php') \
-}/index.php/apps/app_api/harp/exapp-meta"
-
-
 async def nc_get_exapp(app_id: str) -> ExApp | None:
     async with aiohttp.ClientSession() as session, session.get(
         EX_APP_URL, headers={"harp-shared-key": SHARED_KEY}, params={"appId": app_id}
@@ -273,20 +285,12 @@ async def nc_get_exapp(app_id: str) -> ExApp | None:
         return ExApp.model_validate(data)
 
 
-USER_INFO_URL = f"{ \
-    NC_INSTANCE_URL.removesuffix('/').removesuffix('/index.php') \
-}/index.php/apps/app_api/harp/user-info"
-EXCLUDE_HEADERS_USER_INFO = {
-    "host": None
-}
-
-
 async def nc_get_user(all_headers: dict[str, str]) -> NcUser | None:
     ext_headers = {k: v for k, v in all_headers.items() if k.lower() not in EXCLUDE_HEADERS_USER_INFO}
     # todo
     LOGGER.debug("all_headers = %s\next_headers = %s", str(all_headers), str(ext_headers))
     async with aiohttp.ClientSession() as session, session.get(
-        EX_APP_URL, headers={"harp-shared-key": SHARED_KEY, **ext_headers}
+        USER_INFO_URL, headers={"harp-shared-key": SHARED_KEY, **ext_headers}
     ) as resp:
         if not resp.ok:
             LOGGER.debug("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
