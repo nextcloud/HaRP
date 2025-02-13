@@ -203,13 +203,14 @@ async def exapps_msg(
         route_allowed = True  # this is internal ExApp endpoint and request comes from AppAPI
     else:
         nc_user = None
-        if pass_cookie:
+        if pass_cookie or "authorization" in request_headers:
+            # we also pass requests with "authorization" to the Nextcloud to support App Passwords and Basic Auth.
             async with SESSION_CACHE_LOCK:
                 nc_user = SESSION_CACHE.get(pass_cookie)
                 if not nc_user:
                     try:
                         nc_user = await nc_get_user(request_headers)
-                        if nc_user:
+                        if nc_user and pass_cookie:
                             SESSION_CACHE[pass_cookie] = nc_user
                     except ValidationError as e:
                         LOGGER.error("Invalid user info from Nextcloud: %s", e)
