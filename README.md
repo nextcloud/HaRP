@@ -197,17 +197,17 @@ For remote or external Docker Engines—or if you prefer not to mount the Docker
 
    ```toml
    # frpc.toml
-   serverAddr = "your.harp.server.address"  # Replace with your HP_FRP_ADDRESS host
+   serverAddr = "your.harp.server.address"   # Replace with your HP_FRP_ADDRESS host
    serverPort = 8782                         # Default port for FRP
+   metadatas.token = "HP_SHARED_KEY"         # HP_SHARED_KEY in quotes
    transport.tls.certFile = "certs/frp/client.crt"
    transport.tls.keyFile = "certs/frp/client.key"
    transport.tls.trustedCaFile = "certs/frp/ca.crt"
 
    [[proxies]]
-   # Choose a unique remotePort for each Docker Engine (range: 24001-24099)
-   remotePort = 24001
+   remotePort = 24001                        # Unique remotePort for each Docker Engine (range: 24001-24099)
+   name = "deploy-daemon"                    # Unique name for each Docker Engine
    type = "tcp"
-   name = "deploy-daemon"
    [proxies.plugin]
    type = "unix_domain_socket"
    unixPath = "/var/run/docker.sock"

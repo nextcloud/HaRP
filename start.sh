@@ -278,7 +278,7 @@ transport.tls.trustedCaFile = "/certs/frp/ca.crt"
 [[proxies]]
 remotePort = 24000
 type = "tcp"
-name = "deploy-daemon"
+name = "bundled-deploy-daemon"
 [proxies.plugin]
 type = "unix_domain_socket"
 unixPath = "/var/run/docker.sock"
@@ -292,7 +292,7 @@ metadatas.token = "${HP_SHARED_KEY}"
 [[proxies]]
 remotePort = 24000
 type = "tcp"
-name = "deploy-daemon"
+name = "bundled-deploy-daemon"
 [proxies.plugin]
 type = "unix_domain_socket"
 unixPath = "/var/run/docker.sock"
