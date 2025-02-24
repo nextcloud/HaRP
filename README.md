@@ -199,10 +199,13 @@ For remote or external Docker Engines—or if you prefer not to mount the Docker
    # frpc.toml
    serverAddr = "your.harp.server.address"   # Replace with your HP_FRP_ADDRESS host
    serverPort = 8782                         # Default port for FRP
-   metadatas.token = "HP_SHARED_KEY"         # HP_SHARED_KEY in quotes
+
    transport.tls.certFile = "certs/frp/client.crt"
    transport.tls.keyFile = "certs/frp/client.key"
    transport.tls.trustedCaFile = "certs/frp/ca.crt"
+   transport.tls.serverName = "harp.nc"
+
+   metadatas.token = "HP_SHARED_KEY"         # HP_SHARED_KEY in quotes
 
    [[proxies]]
    remotePort = 24001                        # Unique remotePort for each Docker Engine (range: 24001-24099)
