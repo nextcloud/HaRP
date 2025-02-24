@@ -78,17 +78,6 @@ if [ "${HP_FRP_DISABLE_TLS}" != "true" ]; then
         log "INFO: /certs/frp directory created."
         log "INFO: Generating self-signed certificates in /certs/frp..."
 
-        # Determine ALT_NAMES based on FRP_HOST.
-        # If FRP_HOST is 0.0.0.0, enumerate all IPv4 addresses from the network interfaces.
-        if [ "$FRP_HOST" = "0.0.0.0" ]; then
-            ALT_NAMES="DNS:localhost"
-            for ip in $(ip -o -4 addr list | awk '{print $4}' | cut -d/ -f1); do
-                ALT_NAMES="${ALT_NAMES},IP:${ip}"
-            done
-        else
-            ALT_NAMES="IP:${FRP_HOST}"
-        fi
-
         # Write OpenSSL configuration for server to /certs/frp/server-openssl.cnf.
         cat > /certs/frp/server-openssl.cnf <<EOF
 [ req ]
@@ -102,7 +91,7 @@ req_extensions = req_ext
 CN = harp.nc
 
 [ req_ext ]
-subjectAltName = ${ALT_NAMES}
+subjectAltName = DNS:harp.nc
 EOF
 
         # Generate CA key and certificate.
@@ -212,6 +201,7 @@ if [ ! -f "/frps.toml" ]; then
 cat <<EOF >/frps.toml
 bindAddr = "${FRP_HOST}"
 bindPort = ${FRP_PORT}
+
 transport.tls.force = true
 transport.tls.certFile = "/certs/frp/server.crt"
 transport.tls.keyFile = "/certs/frp/server.key"
@@ -236,6 +226,8 @@ EOF
 cat <<EOF >/frps.toml
 bindAddr = "${FRP_HOST}"
 bindPort = ${FRP_PORT}
+
+transport.tls.force = false
 
 log.to = "/frps.log"
 log.level = "info"
@@ -270,10 +262,14 @@ if [ -e "/var/run/docker.sock" ]; then
 cat <<EOF >/frpc-docker.toml
 serverAddr = "${LOCAL_FRP_HOST}"
 serverPort = ${FRP_PORT}
-metadatas.token = "${HP_SHARED_KEY}"
+
+transport.tls.enable = true
 transport.tls.certFile = "/certs/frp/client.crt"
 transport.tls.keyFile = "/certs/frp/client.key"
 transport.tls.trustedCaFile = "/certs/frp/ca.crt"
+transport.tls.serverName = "harp.nc"
+
+metadatas.token = "${HP_SHARED_KEY}"
 
 [[proxies]]
 remotePort = 24000
@@ -287,6 +283,9 @@ EOF
 cat <<EOF >/frpc-docker.toml
 serverAddr = "${LOCAL_FRP_HOST}"
 serverPort = ${FRP_PORT}
+
+transport.tls.enable = false
+
 metadatas.token = "${HP_SHARED_KEY}"
 
 [[proxies]]
