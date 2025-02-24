@@ -47,6 +47,7 @@ docker run \
   -e NC_INSTANCE_URL="http://nextcloud.local" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
+  --restart unless-stopped \
   -p 8780:8780 \
   -d nextcloud-appapi-dsp:harp
 ```
@@ -64,6 +65,7 @@ docker run \
   -e HP_EXAPPS_ADDRESS="192.168.2.5:8780" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
+  --restart unless-stopped \
   --network host \
   -d nextcloud-appapi-dsp:harp
 ```
