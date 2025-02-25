@@ -209,7 +209,7 @@ async def exapps_msg(
                 nc_user = SESSION_CACHE.get(pass_cookie)
                 if not nc_user:
                     try:
-                        nc_user = await nc_get_user(request_headers)
+                        nc_user = await nc_get_user(exapp_id_lower, request_headers)
                         if nc_user and pass_cookie:
                             SESSION_CACHE[pass_cookie] = nc_user
                     except ValidationError as e:
@@ -330,12 +330,13 @@ async def nc_get_exapp(app_id: str) -> ExApp | None:
         return ExApp.model_validate(data)
 
 
-async def nc_get_user(all_headers: dict[str, str]) -> NcUser | None:
+async def nc_get_user(app_id: str, all_headers: dict[str, str]) -> NcUser | None:
     ext_headers = {k: v for k, v in all_headers.items() if k.lower() not in EXCLUDE_HEADERS_USER_INFO}
     LOGGER.debug("all_headers = %s\next_headers = %s", str(all_headers), str(ext_headers))
     async with aiohttp.ClientSession() as session, session.get(
         USER_INFO_URL,
         headers={**ext_headers, "harp-shared-key": SHARED_KEY},
+        params={"appId": app_id},
     ) as resp:
         if not resp.ok:
             LOGGER.info("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
@@ -394,6 +395,7 @@ async def delete_session(request: web.Request):
     return web.HTTPNoContent()
 
 
+# todo: can be removed?
 ###############################################################################
 # Blacklist Cache clearance routes
 ###############################################################################
@@ -499,6 +501,7 @@ def create_web_app() -> web.Application:
     app.router.add_post("/session_storage/{passphrase}", add_session)
     app.router.add_delete("/session_storage/{passphrase}", delete_session)
 
+    # todo: can be removed?
     # Blacklist
     app.router.add_delete("/blacklist_cache/ip/{ip}", clear_blacklist_ip)
     app.router.add_delete("/blacklist_cache", clear_blacklist_cache)

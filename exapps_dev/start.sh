@@ -17,6 +17,7 @@ metadatas.token = "$HP_SHARED_KEY"
 transport.tls.certFile = "/certs/frp/client.crt"
 transport.tls.keyFile = "/certs/frp/client.key"
 transport.tls.trustedCaFile = "/certs/frp/ca.crt"
+transport.tls.serverName = "harp.nc"
 
 [[proxies]]
 name = "$APP_ID"

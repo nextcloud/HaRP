@@ -3,3 +3,6 @@
 
 /certs/
 /dev/
+__pycache__/
+.vscode/
+.venv/
