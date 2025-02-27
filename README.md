@@ -48,7 +48,7 @@ docker run \
   --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
   --restart unless-stopped \
   -p 8780:8780 \
-  -d nextcloud-appapi-dsp:harp
+  -d nextcloud-appapi-harp:release
 ```
 
 > **Note:** By default, `HP_EXAPPS_ADDRESS` is set to `0.0.0.0:8780` — ensure this port is published to the desired interface (for example, host’s **127.0.0.1:8780**).
@@ -67,7 +67,7 @@ docker run \
   --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
   --restart unless-stopped \
   --network host \
-  -d nextcloud-appapi-dsp:harp
+  -d nextcloud-appapi-harp:release
 ```
 
 > **Warning:** Do not forget to change the **HP_SHARED_KEY** value to a secure one!
@@ -193,7 +193,7 @@ If your Docker Engine is running on the same host as **HaRP**, simply mount the 
 For remote or external Docker Engines - or if you prefer not to mount the Docker socket - you can use an FRP (Fast Reverse Proxy) client to establish a secure connection. Follow these steps:
 
 1. **Retrieve Certificate Files:**
-   HaRP automatically generates the necessary FRP certificate files, and places them in its folder `/certs/frp`. You need next files from that folder to connect external Docker Engine to HaRP:
+   HaRP automatically generates the necessary FRP certificate files, and places them in its folder `/certs/frp`. You need next files from it to connect external Docker Engine to HaRP:
    - `client.crt`
    - `client.key`
    - `ca.crt`
@@ -270,7 +270,7 @@ If you've upgraded to Nextcloud 32 and want to switch from using DSP to HaRP, fo
    - **Terminal**: Do not use the `--rm-data` option when removing the app.
    - **From UI**: Do not use the "Delete data when removing" checkbox.
 5. **Install the ExApp**: Install removed ExApps, now they will be installed on `HaRP`.
-6. **Remove DSP**: Now you don't need DSP, and it's safe to remove it.
+6. **Remove DSP**: Now DSP (Docker Socket Proxy) can be safely removed.
 
 ## Contributing
 
