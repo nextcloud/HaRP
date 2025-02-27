@@ -193,7 +193,7 @@ If your Docker Engine is running on the same host as **HaRP**, simply mount the 
 For remote or external Docker Engines - or if you prefer not to mount the Docker socket - you can use an FRP (Fast Reverse Proxy) client to establish a secure connection. Follow these steps:
 
 1. **Retrieve Certificate Files:**
-   HaRP automatically generates the necessary FRP certificate files, and place them in its folder `/certs/frp`. You need next files from it to connect external Docker Engine to HaRP:
+   HaRP automatically generates the necessary FRP certificate files, and places them in its folder `/certs/frp`. You need next files from that folder to connect external Docker Engine to HaRP:
    - `client.crt`
    - `client.key`
    - `ca.crt`
