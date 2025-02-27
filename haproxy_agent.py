@@ -84,7 +84,7 @@ EXAPP_CACHE: dict[str, ExApp] = {}
 
 SESSION_CACHE_LOCK = asyncio.Lock()
 SESSION_CACHE: dict[str, NcUser] = {}
-# TO-DO: what to use here? "oc_sessionPassphrase" (seems deprecated) or "nc_token" (not present for anon users)
+SESSION_REQUEST_WINDOW = 3  # keep information about session for 3 seconds
 
 BLACKLIST_CACHE_LOCK = asyncio.Lock()
 BLACKLIST_CACHE: dict[str, list[float]] = {}  # ip_str -> list of timestamps of failures
@@ -372,60 +372,6 @@ async def delete_exapp(request: web.Request):
 
 
 ###############################################################################
-# Session routes
-###############################################################################
-
-
-async def add_session(request: web.Request):
-    data = await request.json()
-    # Overwrite if already exists
-    async with SESSION_CACHE_LOCK:
-        try:
-            SESSION_CACHE[request.match_info["passphrase"]] = NcUser.model_validate(data)
-        except ValidationError:
-            raise web.HTTPBadRequest() from None
-    return web.HTTPNoContent()
-
-
-async def delete_session(request: web.Request):
-    async with SESSION_CACHE_LOCK:
-        old = SESSION_CACHE.pop(request.match_info["passphrase"], None)
-    if old is None:
-        raise web.HTTPNotFound()
-    return web.HTTPNoContent()
-
-
-# todo: can be removed?
-###############################################################################
-# Blacklist Cache clearance routes
-###############################################################################
-
-
-async def clear_blacklist_ip(request: web.Request):
-    """Clear the blacklist cache for a specific IP."""
-    ip = request.match_info["ip"]
-    try:
-        ipaddress.ip_address(ip)
-    except ValueError:
-        raise web.HTTPBadRequest() from None
-
-    async with BLACKLIST_CACHE_LOCK:
-        if ip in BLACKLIST_CACHE:
-            del BLACKLIST_CACHE[ip]
-            LOGGER.info("Cleared blacklist cache for IP %s", ip)
-            return web.HTTPNoContent()
-        raise web.HTTPNotFound()
-
-
-async def clear_blacklist_cache(request: web.Request):
-    """Clear the entire blacklist cache."""
-    async with BLACKLIST_CACHE_LOCK:
-        BLACKLIST_CACHE.clear()
-    LOGGER.info("Cleared entire blacklist cache.")
-    return web.Response(text="Cleared entire blacklist cache.")
-
-
-###############################################################################
 # Special routes for AppAPI
 ###############################################################################
 
@@ -496,15 +442,6 @@ def create_web_app() -> web.Application:
     # ExApp routes
     app.router.add_post("/exapp_storage/{app_id}", add_exapp)
     app.router.add_delete("/exapp_storage/{app_id}", delete_exapp)
-
-    # Session routes
-    app.router.add_post("/session_storage/{passphrase}", add_session)
-    app.router.add_delete("/session_storage/{passphrase}", delete_session)
-
-    # todo: can be removed?
-    # Blacklist
-    app.router.add_delete("/blacklist_cache/ip/{ip}", clear_blacklist_ip)
-    app.router.add_delete("/blacklist_cache", clear_blacklist_cache)
 
     # FRP certificates
     app.router.add_get("/frp_certificates", get_frp_certificates)
