@@ -83,8 +83,12 @@ EXAPP_CACHE_LOCK = asyncio.Lock()
 EXAPP_CACHE: dict[str, ExApp] = {}
 
 SESSION_CACHE_LOCK = asyncio.Lock()
-SESSION_CACHE: dict[str, NcUser] = {}
-# TO-DO: what to use here? "oc_sessionPassphrase" (seems deprecated) or "nc_token" (not present for anon users)
+SESSION_CACHE: dict[str, tuple[NcUser, float]] = {}  # Stores NcUser and timestamp
+SESSION_REQUEST_WINDOW = float(os.environ.get("SESSION_LIFETIME", "3"))  # Keep session information for 3 seconds
+if SESSION_REQUEST_WINDOW < 0:
+    raise ValueError("`SESSION_LIFETIME` cannot be less than 0")
+if SESSION_REQUEST_WINDOW > 10:
+    raise ValueError("`SESSION_LIFETIME` cannot be greater than 10")
 
 BLACKLIST_CACHE_LOCK = asyncio.Lock()
 BLACKLIST_CACHE: dict[str, list[float]] = {}  # ip_str -> list of timestamps of failures
@@ -122,6 +126,34 @@ async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
         if len(attempts) >= BLACKLIST_MAX_FAILS_COUNT:
             return True
     return False
+
+
+###############################################################################
+# SESSION CACHE functions
+###############################################################################
+
+
+async def record_session(pass_cookie: str, nc_user: NcUser) -> None:
+    now = time.time()
+    async with SESSION_CACHE_LOCK:
+        SESSION_CACHE[pass_cookie] = (nc_user, now)
+    LOGGER.error("Recorded session for cookie %s, User %s", pass_cookie, nc_user.user_id)
+
+
+async def get_session(pass_cookie: str) -> NcUser | None:
+    """Retrieve the session for the given IP address."""
+    now = time.time()
+    async with SESSION_CACHE_LOCK:
+        session_data = SESSION_CACHE.get(pass_cookie)
+        if session_data:
+            nc_user, timestamp = session_data
+            # Check if the session is still valid based on the SESSION_REQUEST_WINDOW
+            if now - timestamp <= SESSION_REQUEST_WINDOW:
+                return nc_user
+            # Session expired, remove it
+            del SESSION_CACHE[pass_cookie]
+            LOGGER.error("Session for cookie %s expired", pass_cookie)
+    return None
 
 
 ###############################################################################
@@ -200,24 +232,23 @@ async def exapps_msg(
             LOGGER.error("Only requests from AppAPI allowed to the internal endpoints.")
             await record_ip_failure(client_ip_str)
             return reply.set_txn_var("bad_request", 1)
-        route_allowed = True  # this is internal ExApp endpoint and request comes from AppAPI
+        route_allowed = True  # This is internal ExApp endpoint and request comes from AppAPI
     else:
         nc_user = None
         if pass_cookie or "authorization" in request_headers:
-            # we also pass requests with "authorization" to the Nextcloud to support App Passwords and Basic Auth.
-            async with SESSION_CACHE_LOCK:
-                nc_user = SESSION_CACHE.get(pass_cookie)
-                if not nc_user:
-                    try:
-                        nc_user = await nc_get_user(exapp_id_lower, request_headers)
-                        if nc_user and pass_cookie:
-                            SESSION_CACHE[pass_cookie] = nc_user
-                    except ValidationError as e:
-                        LOGGER.error("Invalid user info from Nextcloud: %s", e)
-                        return reply.set_txn_var("unauthorized", 1)
-                    except Exception as e:
-                        LOGGER.exception("Failed to fetch user info from Nextcloud", exc_info=e)
-                        return reply.set_txn_var("unauthorized", 1)
+            # We also pass requests with "authorization" to the Nextcloud to support App Passwords and Basic Auth.
+            nc_user = await get_session(pass_cookie)
+            if not nc_user:
+                try:
+                    nc_user = await nc_get_user(exapp_id_lower, request_headers)
+                    if nc_user and pass_cookie:
+                        await record_session(pass_cookie, nc_user)
+                except ValidationError as e:
+                    LOGGER.error("Invalid user info from Nextcloud: %s", e)
+                    return reply.set_txn_var("unauthorized", 1)
+                except Exception as e:
+                    LOGGER.exception("Failed to fetch user info from Nextcloud", exc_info=e)
+                    return reply.set_txn_var("unauthorized", 1)
 
         for route in exapp_record.routes:
             try:
@@ -372,60 +403,6 @@ async def delete_exapp(request: web.Request):
 
 
 ###############################################################################
-# Session routes
-###############################################################################
-
-
-async def add_session(request: web.Request):
-    data = await request.json()
-    # Overwrite if already exists
-    async with SESSION_CACHE_LOCK:
-        try:
-            SESSION_CACHE[request.match_info["passphrase"]] = NcUser.model_validate(data)
-        except ValidationError:
-            raise web.HTTPBadRequest() from None
-    return web.HTTPNoContent()
-
-
-async def delete_session(request: web.Request):
-    async with SESSION_CACHE_LOCK:
-        old = SESSION_CACHE.pop(request.match_info["passphrase"], None)
-    if old is None:
-        raise web.HTTPNotFound()
-    return web.HTTPNoContent()
-
-
-# todo: can be removed?
-###############################################################################
-# Blacklist Cache clearance routes
-###############################################################################
-
-
-async def clear_blacklist_ip(request: web.Request):
-    """Clear the blacklist cache for a specific IP."""
-    ip = request.match_info["ip"]
-    try:
-        ipaddress.ip_address(ip)
-    except ValueError:
-        raise web.HTTPBadRequest() from None
-
-    async with BLACKLIST_CACHE_LOCK:
-        if ip in BLACKLIST_CACHE:
-            del BLACKLIST_CACHE[ip]
-            LOGGER.info("Cleared blacklist cache for IP %s", ip)
-            return web.HTTPNoContent()
-        raise web.HTTPNotFound()
-
-
-async def clear_blacklist_cache(request: web.Request):
-    """Clear the entire blacklist cache."""
-    async with BLACKLIST_CACHE_LOCK:
-        BLACKLIST_CACHE.clear()
-    LOGGER.info("Cleared entire blacklist cache.")
-    return web.Response(text="Cleared entire blacklist cache.")
-
-
-###############################################################################
 # Special routes for AppAPI
 ###############################################################################
 
@@ -496,15 +473,6 @@ def create_web_app() -> web.Application:
     # ExApp routes
     app.router.add_post("/exapp_storage/{app_id}", add_exapp)
     app.router.add_delete("/exapp_storage/{app_id}", delete_exapp)
-
-    # Session routes
-    app.router.add_post("/session_storage/{passphrase}", add_session)
-    app.router.add_delete("/session_storage/{passphrase}", delete_session)
-
-    # todo: can be removed?
-    # Blacklist
-    app.router.add_delete("/blacklist_cache/ip/{ip}", clear_blacklist_ip)
-    app.router.add_delete("/blacklist_cache", clear_blacklist_cache)
 
     # FRP certificates
     app.router.add_get("/frp_certificates", get_frp_certificates)
