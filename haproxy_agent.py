@@ -83,8 +83,12 @@ EXAPP_CACHE_LOCK = asyncio.Lock()
 EXAPP_CACHE: dict[str, ExApp] = {}
 
 SESSION_CACHE_LOCK = asyncio.Lock()
-SESSION_CACHE: dict[str, NcUser] = {}
-SESSION_REQUEST_WINDOW = 3  # keep information about session for 3 seconds
+SESSION_CACHE: dict[str, tuple[NcUser, float]] = {}  # Stores NcUser and timestamp
+SESSION_REQUEST_WINDOW = float(os.environ.get("SESSION_LIFETIME", "3"))  # Keep session information for 3 seconds
+if SESSION_REQUEST_WINDOW < 0:
+    raise ValueError("`SESSION_LIFETIME` cannot be less than 0")
+if SESSION_REQUEST_WINDOW > 10:
+    raise ValueError("`SESSION_LIFETIME` cannot be greater than 10")
 
 BLACKLIST_CACHE_LOCK = asyncio.Lock()
 BLACKLIST_CACHE: dict[str, list[float]] = {}  # ip_str -> list of timestamps of failures
@@ -122,6 +126,34 @@ async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
         if len(attempts) >= BLACKLIST_MAX_FAILS_COUNT:
             return True
     return False
+
+
+###############################################################################
+# SESSION CACHE functions
+###############################################################################
+
+
+async def record_session(pass_cookie: str, nc_user: NcUser) -> None:
+    now = time.time()
+    async with SESSION_CACHE_LOCK:
+        SESSION_CACHE[pass_cookie] = (nc_user, now)
+    LOGGER.error("Recorded session for cookie %s, User %s", pass_cookie, nc_user.user_id)
+
+
+async def get_session(pass_cookie: str) -> NcUser | None:
+    """Retrieve the session for the given IP address."""
+    now = time.time()
+    async with SESSION_CACHE_LOCK:
+        session_data = SESSION_CACHE.get(pass_cookie)
+        if session_data:
+            nc_user, timestamp = session_data
+            # Check if the session is still valid based on the SESSION_REQUEST_WINDOW
+            if now - timestamp <= SESSION_REQUEST_WINDOW:
+                return nc_user
+            # Session expired, remove it
+            del SESSION_CACHE[pass_cookie]
+            LOGGER.error("Session for cookie %s expired", pass_cookie)
+    return None
 
 
 ###############################################################################
@@ -200,24 +232,23 @@ async def exapps_msg(
             LOGGER.error("Only requests from AppAPI allowed to the internal endpoints.")
             await record_ip_failure(client_ip_str)
             return reply.set_txn_var("bad_request", 1)
-        route_allowed = True  # this is internal ExApp endpoint and request comes from AppAPI
+        route_allowed = True  # This is internal ExApp endpoint and request comes from AppAPI
     else:
         nc_user = None
         if pass_cookie or "authorization" in request_headers:
-            # we also pass requests with "authorization" to the Nextcloud to support App Passwords and Basic Auth.
-            async with SESSION_CACHE_LOCK:
-                nc_user = SESSION_CACHE.get(pass_cookie)
-                if not nc_user:
-                    try:
-                        nc_user = await nc_get_user(exapp_id_lower, request_headers)
-                        if nc_user and pass_cookie:
-                            SESSION_CACHE[pass_cookie] = nc_user
-                    except ValidationError as e:
-                        LOGGER.error("Invalid user info from Nextcloud: %s", e)
-                        return reply.set_txn_var("unauthorized", 1)
-                    except Exception as e:
-                        LOGGER.exception("Failed to fetch user info from Nextcloud", exc_info=e)
-                        return reply.set_txn_var("unauthorized", 1)
+            # We also pass requests with "authorization" to the Nextcloud to support App Passwords and Basic Auth.
+            nc_user = await get_session(pass_cookie)
+            if not nc_user:
+                try:
+                    nc_user = await nc_get_user(exapp_id_lower, request_headers)
+                    if nc_user and pass_cookie:
+                        await record_session(pass_cookie, nc_user)
+                except ValidationError as e:
+                    LOGGER.error("Invalid user info from Nextcloud: %s", e)
+                    return reply.set_txn_var("unauthorized", 1)
+                except Exception as e:
+                    LOGGER.exception("Failed to fetch user info from Nextcloud", exc_info=e)
+                    return reply.set_txn_var("unauthorized", 1)
 
         for route in exapp_record.routes:
             try:
