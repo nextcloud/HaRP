@@ -84,11 +84,11 @@ EXAPP_CACHE: dict[str, ExApp] = {}
 
 SESSION_CACHE_LOCK = asyncio.Lock()
 SESSION_CACHE: dict[str, tuple[NcUser, float]] = {}  # Stores NcUser and timestamp
-SESSION_REQUEST_WINDOW = float(os.environ.get("SESSION_LIFETIME", "3"))  # Keep session information for 3 seconds
+SESSION_REQUEST_WINDOW = float(os.environ.get("HP_SESSION_LIFETIME", "3"))  # Keep session information for 3 seconds
 if SESSION_REQUEST_WINDOW < 0:
-    raise ValueError("`SESSION_LIFETIME` cannot be less than 0")
+    raise ValueError("`HP_SESSION_LIFETIME` cannot be less than 0")
 if SESSION_REQUEST_WINDOW > 10:
-    raise ValueError("`SESSION_LIFETIME` cannot be greater than 10")
+    raise ValueError("`HP_SESSION_LIFETIME` cannot be greater than 10")
 
 BLACKLIST_CACHE_LOCK = asyncio.Lock()
 BLACKLIST_CACHE: dict[str, list[float]] = {}  # ip_str -> list of timestamps of failures

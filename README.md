@@ -4,8 +4,6 @@
 -->
 # Nextcloud AppAPI HaProxy Reversed Proxy (HaRP)
 
-**Note:** *Work is still in progress*
-
 ---
 
 ## Overview
@@ -46,10 +44,11 @@ docker run \
   -e HP_SHARED_KEY="some_very_secure_password" \
   -e NC_INSTANCE_URL="http://nextcloud.local" \
   -v /var/run/docker.sock:/var/run/docker.sock \
+  -v `pwd`/certs:/certs \
   --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
   --restart unless-stopped \
   -p 8780:8780 \
-  -d nextcloud-appapi-dsp:harp
+  -d nextcloud-appapi-harp:release
 ```
 
 > **Note:** By default, `HP_EXAPPS_ADDRESS` is set to `0.0.0.0:8780` — ensure this port is published to the desired interface (for example, host’s **127.0.0.1:8780**).
@@ -64,10 +63,11 @@ docker run \
   -e NC_INSTANCE_URL="http://nextcloud.local" \
   -e HP_EXAPPS_ADDRESS="192.168.2.5:8780" \
   -v /var/run/docker.sock:/var/run/docker.sock \
+  -v `pwd`/certs:/certs \
   --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
   --restart unless-stopped \
   --network host \
-  -d nextcloud-appapi-dsp:harp
+  -d nextcloud-appapi-harp:release
 ```
 
 > **Warning:** Do not forget to change the **HP_SHARED_KEY** value to a secure one!
@@ -161,10 +161,14 @@ HaRP is configured via several environment variables. Here are the key variables
   - **Description:** Flag that determines whether to output verbose logging to the console during  container startup.
   - **Default:** `1`
 
+- **`HP_SESSION_LIFETIME`**
+  - **Description:** A floating-point value that determines how long the Nextcloud session is retained in HaRP, in seconds. Possible values range from `0` (disable session caching) to `10` seconds.
+  - **Default:** `3`
+
 - **Timeout Variables:**
   - **`HP_TIMEOUT_CONNECT`**
     - **Description:** Maximum time allowed for establishing a connection.
-    - **Default:** `10s`
+    - **Default:** `30s`
   - **`HP_TIMEOUT_CLIENT`**
     - **Description:** Timeout for client-side connections.
     - **Default:** `30s`
@@ -186,10 +190,10 @@ If your Docker Engine is running on the same host as **HaRP**, simply mount the 
 
 ### 2. Connecting External Docker Engines via FRP
 
-For remote or external Docker Engines—or if you prefer not to mount the Docker socket—you can use an FRP (Fast Reverse Proxy) client to establish a secure connection. Follow these steps:
+For remote or external Docker Engines - or if you prefer not to mount the Docker socket - you can use an FRP (Fast Reverse Proxy) client to establish a secure connection. Follow these steps:
 
 1. **Retrieve Certificate Files:**
-   HaRP automatically generates the necessary FRP certificate files. Use the appropriate Nextcloud AppAPI command (commonly via `occ`) to retrieve the following files from the HaRP container:
+   HaRP automatically generates the necessary FRP certificate files, and places them in its folder `/certs/frp`. You need next files from it to connect external Docker Engine to HaRP:
    - `client.crt`
    - `client.key`
    - `ca.crt`
@@ -227,7 +231,7 @@ For remote or external Docker Engines—or if you prefer not to mount the Docker
 >
 > Adding `HaRP` support is fully compatible with the existing `DSP` system, so you won’t need to maintain two separate release types of your ExApp.
 
-1. Copy the `start.s`h script from the `exapps_dev` folder of this repository and set it as the entry point in your ExApp’s `Dockerfile`.
+1. Copy the `start.sh` script from the `exapps_dev` folder of this repository and set it as the entry point in your ExApp’s `Dockerfile`.
 2. After copying `start.sh`, edit its last line so that it runs your ExApp’s main binary (or script).
 3. Add the following lines to your `Dockerfile` to automatically include the `FRP client` binaries in your Docker image:
 
@@ -252,6 +256,21 @@ For remote or external Docker Engines—or if you prefer not to mount the Docker
     > **Note:** For `Alpine 3.21` Linux you can just install `FRP` from repo using `apk add frp` command.
 
 That's it!
+
+## Nextcloud 32: Migrating Existing ExApps from DSP to HaRP
+
+> **Note:** All ExApps developed by Nextcloud will support HaRP when Nextcloud 32 is released. We hope that most ExApps from the community will also support it. **Contact us if you need assistance.**
+
+If you've upgraded to Nextcloud 32 and want to switch from using DSP to HaRP, follow these steps:
+
+1. **Install HaRP** on the same Docker Engine that you were using for DSP.
+2. **Test Deployment on HaRP** with usual `TestDeploy` button.
+3. **Set HaRP as the default deployment daemon** for ExApps.
+4. **Remove the ExApps without deleting their data volumes**:
+   - **Terminal**: Do not use the `--rm-data` option when removing the app.
+   - **From UI**: Do not use the "Delete data when removing" checkbox.
+5. **Install the ExApp**: Install removed ExApps, now they will be installed on `HaRP`.
+6. **Remove DSP**: Now DSP (Docker Socket Proxy) can be safely removed.
 
 ## Contributing
 

@@ -27,13 +27,13 @@ FROM haproxy:3.1.2-alpine3.21
 
 USER root
 
-# Bind addresses for 2 frontends (HTTP + HTTPS for exapp) and FRP Server.
+# Bind addresses for 2 frontends (HTTP + HTTPS for exapps) and FRP Server.
 # If /certs/cert.pem does not exist, EXAPPS HTTPS frontend are disabled automatically.
 ENV HP_EXAPPS_ADDRESS="0.0.0.0:8780" \
     HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781" \
     HP_FRP_ADDRESS="0.0.0.0:8782" \
     HP_FRP_DISABLE_TLS="false" \
-    HP_TIMEOUT_CONNECT="10s" \
+    HP_TIMEOUT_CONNECT="30s" \
     HP_TIMEOUT_CLIENT="30s" \
     HP_TIMEOUT_SERVER="1800s" \
     NC_INSTANCE_URL="" \
