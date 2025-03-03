@@ -45,10 +45,11 @@ docker run \
   -e NC_INSTANCE_URL="http://nextcloud.local" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v `pwd`/certs:/certs \
-  --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
+  --name appapi-harp -h appapi-harp \
   --restart unless-stopped \
   -p 8780:8780 \
-  -d nextcloud-appapi-harp:release
+  -p 8782:8782 \
+  -d ghcr.io/nextcloud/nextcloud-appapi-harp:release
 ```
 
 > **Note:** By default, `HP_EXAPPS_ADDRESS` is set to `0.0.0.0:8780` — ensure this port is published to the desired interface (for example, host’s **127.0.0.1:8780**).
@@ -64,10 +65,10 @@ docker run \
   -e HP_EXAPPS_ADDRESS="192.168.2.5:8780" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v `pwd`/certs:/certs \
-  --name nextcloud-appapi-harp -h nextcloud-appapi-harp \
+  --name appapi-harp -h appapi-harp \
   --restart unless-stopped \
   --network host \
-  -d nextcloud-appapi-harp:release
+  -d ghcr.io/nextcloud/nextcloud-appapi-harp:release
 ```
 
 > **Warning:** Do not forget to change the **HP_SHARED_KEY** value to a secure one!
