@@ -1,5 +1,8 @@
 """An agent for HaProxy that takes care of most of the authentication logic of AppAPI. Python 3.12 required."""
 
+# SPDX-FileCopyrightText: 2025 Nextcloud GmbH and Nextcloud contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 import asyncio
 import ipaddress
 import json

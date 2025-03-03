@@ -10,3 +10,13 @@ path = [".github/**"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "none"
 SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = [
+  "exapps_dev/frp_0.61.1_linux_amd64.tar.gz",
+  "exapps_dev/frp_0.61.1_linux_arm64.tar.gz"
+]
+precedence = "closest"
+SPDX-FileCopyrightText = "Fatedier <fatedier@gmail.com>"
+SPDX-License-Identifier = "Apache-2.0"
+comment = "Files originally taken from https://github.com/fatedier/frp"
