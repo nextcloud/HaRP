@@ -240,9 +240,9 @@ For remote or external Docker Engines - or if you prefer not to mount the Docker
     RUN set -ex; \
         ARCH=$(uname -m); \
         if [ "$ARCH" = "aarch64" ]; then \
-          FRP_URL="https://raw.githubusercontent.com/cloud-py-api/HaRP/main/exapps_dev/frp_0.61.1_linux_arm64.tar.gz"; \
+          FRP_URL="https://raw.githubusercontent.com/nextcloud/HaRP/main/exapps_dev/frp_0.61.1_linux_arm64.tar.gz"; \
         else \
-          FRP_URL="https://raw.githubusercontent.com/cloud-py-api/HaRP/main/exapps_dev/frp_0.61.1_linux_amd64.tar.gz"; \
+          FRP_URL="https://raw.githubusercontent.com/nextcloud/HaRP/main/exapps_dev/frp_0.61.1_linux_amd64.tar.gz"; \
         fi; \
         echo "Downloading FRP client from $FRP_URL"; \
         curl -L "$FRP_URL" -o /tmp/frp.tar.gz; \
