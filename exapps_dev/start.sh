@@ -22,11 +22,12 @@ transport.tls.serverName = "harp.nc"
 metadatas.token = "$HP_SHARED_KEY"
 
 [[proxies]]
-name = "$APP_ID"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = $APP_PORT
 remotePort = $APP_PORT
+type = "tcp"
+name = "$APP_ID"
+[proxies.plugin]
+type = "unix_domain_socket"
+unixPath = "/tmp/exapp.sock"
 EOF
     else
         echo "Directory /certs/frp not found. Creating configuration without TLS certificates."
@@ -39,11 +40,12 @@ transport.tls.enable = false
 metadatas.token = "$HP_SHARED_KEY"
 
 [[proxies]]
-name = "$APP_ID"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = $APP_PORT
 remotePort = $APP_PORT
+type = "tcp"
+name = "$APP_ID"
+[proxies.plugin]
+type = "unix_domain_socket"
+unixPath = "/tmp/exapp.sock"
 EOF
     fi
 else
