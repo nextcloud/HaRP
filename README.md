@@ -273,6 +273,40 @@ If you've upgraded to Nextcloud 32 and want to switch from using DSP to HaRP, fo
 5. **Install the ExApp**: Install removed ExApps, now they will be installed on `HaRP`.
 6. **Remove DSP**: Now DSP (Docker Socket Proxy) can be safely removed.
 
+## Building & Deploying HaRP from Source
+
+This section provides helper information for developing and modifying HaRP. The `nextcloud-docker-dev` environment will be used for this purpose.
+
+### Remove Any Existing HaRP Container
+
+```bash
+docker container remove --force appapi-harp || true
+````
+
+### Build a Local HaRP Image from Source
+
+```bash
+docker build -t nextcloud-appapi-harp:local .
+```
+
+### Deploy HaRP Using the Locally Built Image
+
+```bash
+docker run \
+  -e HP_SHARED_KEY="some_very_secure_password" \
+  -e NC_INSTANCE_URL="http://nextcloud.local" \
+  -e HP_LOG_LEVEL="debug" \
+  -e HP_VERBOSE_START="1" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v `pwd`/certs:/certs \
+  --name appapi-harp -h appapi-harp \
+  --restart unless-stopped \
+  --network=master_default \
+  -p 8780:8780 \
+  -p 8782:8782 \
+  -d nextcloud-appapi-harp:local
+```
+
 ## Contributing
 
 Contributions to HaRP are welcome. Feel free to open issues, discussions or submit pull requests with improvements, bug fixes, or new features.
