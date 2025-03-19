@@ -221,6 +221,7 @@ async def exapps_msg(
                         LOGGER.error("No such ExApp enabled: %s", exapp_id)
                         await record_ip_failure(client_ip_str)
                         return reply.set_txn_var("not_found", 1)
+                    LOGGER.info("Received new ExApp record: %s", exapp_record)
                     EXAPP_CACHE[exapp_id_lower] = exapp_record
                 except ValidationError as e:
                     LOGGER.error("Invalid ExApp metadata from Nextcloud: %s", e)
@@ -230,12 +231,12 @@ async def exapps_msg(
                     return reply.set_txn_var("not_found", 1)
 
     route_allowed = False
-    if target_path in ("/heartbeat", "/init", "/enabled"):
-        if not authorization_app_api:
-            LOGGER.error("Only requests from AppAPI allowed to the internal endpoints.")
-            await record_ip_failure(client_ip_str)
-            return reply.set_txn_var("bad_request", 1)
-        route_allowed = True  # This is internal ExApp endpoint and request comes from AppAPI
+    if authorization_app_api:
+        route_allowed = True  # We skip routes checking for AppAPI signed requests
+    elif target_path in ("/heartbeat", "/init", "/enabled"):
+        LOGGER.error("Only requests from AppAPI allowed to the internal endpoints.")
+        await record_ip_failure(client_ip_str)
+        return reply.set_txn_var("bad_request", 1)
     else:
         nc_user = None
         if pass_cookie or "authorization" in request_headers:
