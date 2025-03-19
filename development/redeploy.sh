@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: 2025 Nextcloud GmbH and Nextcloud contributors
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-set -e
-
-docker container remove --force appapi-harp || true
+docker container remove --force appapi-harp
 
 docker build -t nextcloud-appapi-harp:local .
 

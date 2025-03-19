@@ -280,7 +280,7 @@ This section provides helper information for developing and modifying HaRP. The 
 ### Remove Any Existing HaRP Container
 
 ```bash
-docker container remove --force appapi-harp || true
+docker container remove --force appapi-harp
 ````
 
 ### Build a Local HaRP Image from Source
