@@ -35,7 +35,7 @@ logging.getLogger("aiohttp").setLevel(level=LOG_LEVEL)
 NC_REQ_URL = NC_INSTANCE_URL.removesuffix("/").removesuffix("/index.php")
 EX_APP_URL = f"{NC_REQ_URL}/index.php/apps/app_api/harp/exapp-meta"
 USER_INFO_URL = f"{NC_REQ_URL}/index.php/apps/app_api/harp/user-info"
-EXCLUDE_HEADERS_USER_INFO = {"host": None}
+EXCLUDE_HEADERS_USER_INFO = {"host", "content-length"}
 
 SPOA_AGENT = SpoaServer()
 
