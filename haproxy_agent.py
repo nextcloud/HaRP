@@ -95,8 +95,10 @@ if SESSION_REQUEST_WINDOW > 10:
 
 BLACKLIST_CACHE_LOCK = asyncio.Lock()
 BLACKLIST_CACHE: dict[str, list[float]] = {}  # ip_str -> list of timestamps of failures
-BLACKLIST_REQUEST_WINDOW = 300  # 5 minutes in seconds
-BLACKLIST_MAX_FAILS_COUNT = 5  # 5 invalid attempts during BLACKLIST_REQUEST_WINDOW
+# 5 minutes in seconds
+BLACKLIST_REQUEST_WINDOW = int(os.getenv("HP_BLACKLIST_WINDOW", "300"))
+# 10 invalid attempts during BLACKLIST_REQUEST_WINDOW
+BLACKLIST_MAX_FAILS_COUNT = int(os.getenv("HP_BLACKLIST_COUNT", "10"))
 
 
 ###############################################################################

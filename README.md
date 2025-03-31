@@ -166,6 +166,10 @@ HaRP is configured via several environment variables. Here are the key variables
   - **Description:** A floating-point value that determines how long the Nextcloud session is retained in HaRP, in seconds. Possible values range from `0` (disable session caching) to `10` seconds.
   - **Default:** `3`
 
+- **`HP_BLACKLIST_COUNT`**
+  - **Description:** The maximum no. of bad status codes (4xx, 5xx) before the IP is banned for `HP_BLACKLIST_WINDOW` seconds.
+  - **Default:** `10`
+
 - **Timeout Variables:**
   - **`HP_TIMEOUT_CONNECT`**
     - **Description:** Maximum time allowed for establishing a connection.
@@ -176,6 +180,9 @@ HaRP is configured via several environment variables. Here are the key variables
   - **`HP_TIMEOUT_SERVER`**
     - **Description:** Timeout for server-side connections. **We do not recommend to change this value.**
     - **Default:** `1800s`
+  - **`HP_BLACKLIST_WINDOW`**
+    - **Description:** Timeout after which an IP is removed from the blacklist, in seconds.
+    - **Default:** `300`
 
 ## Connecting Docker Engines
 
