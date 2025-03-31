@@ -206,6 +206,7 @@ For remote or external Docker Engines - or if you prefer not to mount the Docker
    # frpc.toml
    serverAddr = "your.harp.server.address"   # Replace with your HP_FRP_ADDRESS host
    serverPort = 8782                         # Default port for FRP
+   loginFailExit = false                     # If the FRP (HaRP) server is unavailable, continue trying to log in.
 
    transport.tls.certFile = "certs/frp/client.crt"
    transport.tls.keyFile = "certs/frp/client.key"
