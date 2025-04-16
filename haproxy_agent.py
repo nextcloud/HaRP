@@ -4,15 +4,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 import asyncio
+import contextlib
 import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import time
 from base64 import b64encode
 from enum import IntEnum
-from ipaddress import IPv4Address, IPv6Address
+from ipaddress import IPv4Address, IPv6Address, ip_address
 from typing import Self
 
 import aiohttp
@@ -69,8 +71,10 @@ class ExAppRoute(BaseModel):
 class ExApp(BaseModel):
     exapp_token: str = Field(...)
     exapp_version: str = Field(...)
+    host: str = Field(...)
     port: int = Field(...)
     routes: list[ExAppRoute] = Field([])
+    resolved_host: str = Field("", description="Contains resolved host field to the IP address.")
 
 
 class NcUser(BaseModel):
@@ -200,7 +204,14 @@ async def exapps_msg(
     exapp_record = None
     if all(
         key in request_headers
-        for key in ["ex-app-version", "ex-app-id", "ex-app-port", "authorization-app-api", "harp-shared-key"]
+        for key in [
+            "ex-app-version",
+            "ex-app-id",
+            "ex-app-host",
+            "ex-app-port",
+            "authorization-app-api",
+            "harp-shared-key",
+        ]
     ):
         # This is a direct request from AppAPI to ExApp using AppAPI PHP functions "requestToExAppXXX"
         if request_headers["harp-shared-key"] != SHARED_KEY:
@@ -209,6 +220,7 @@ async def exapps_msg(
         exapp_record = ExApp(
             exapp_token="",
             exapp_version=request_headers["ex-app-version"],
+            host=request_headers["ex-app-host"],
             port=int(request_headers["ex-app-port"]),
         )
         authorization_app_api = request_headers["authorization-app-api"]
@@ -290,7 +302,18 @@ async def exapps_msg(
     else:
         reply = reply.set_txn_var("backend", "ex_apps_backend")
 
-    LOGGER.info("Rerouting request to %s:%s", target_path, exapp_record.port)
+    if not exapp_record.resolved_host:
+        try:
+            ip_address(exapp_record.host)
+            exapp_record.resolved_host = exapp_record.host
+        except ValueError:
+            exapp_record.resolved_host = resolve_ip(exapp_record.host)
+        if not exapp_record.resolved_host:
+            LOGGER.error("Cannot resolve '%s' to IP address.", exapp_record.host)
+            return reply.set_txn_var("not_found", 1)
+
+    LOGGER.info("Rerouting request to %s:%s with path=%s", exapp_record.resolved_host, exapp_record.port, target_path)
+    reply = reply.set_txn_var("target_ip", exapp_record.resolved_host)
     reply = reply.set_txn_var("target_port", exapp_record.port)
     reply = reply.set_txn_var("exapp_token", authorization_app_api)
     reply = reply.set_txn_var("exapp_version", exapp_record.exapp_version)
@@ -382,6 +405,19 @@ async def nc_get_user(app_id: str, all_headers: dict[str, str]) -> NcUser | None
             raise Exception("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
         data = await resp.json()
         return NcUser.model_validate(data)
+
+
+def resolve_ip(hostname: str) -> str:
+    with contextlib.suppress(socket.gaierror):
+        addr_info = socket.getaddrinfo(hostname, None)
+        for family, _, _, _, sockaddr in addr_info:
+            if family == socket.AF_INET:  # IPv4
+                return sockaddr[0]
+        # If no IPv4, return first IPv6
+        for family, _, _, _, sockaddr in addr_info:
+            if family == socket.AF_INET6:  # IPv6
+                return sockaddr[0]
+    return ""
 
 
 ###############################################################################

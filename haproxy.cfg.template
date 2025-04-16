@@ -62,8 +62,9 @@ _HTTPS_FRONTEND_     use_backend %[var(txn.exapps.backend)]
 ###############################################################################
 backend ex_apps_backend
     mode http
-    server frp_server 127.0.0.1
+    server frp_server 0.0.0.0
     http-request set-path %[var(txn.exapps.target_path)]
+    http-request set-dst var(txn.exapps.target_ip)
     http-request set-dst-port var(txn.exapps.target_port)
     http-request set-header EX-APP-ID %[var(txn.exapps.exapp_id)]
     http-request set-header EX-APP-VERSION %[var(txn.exapps.exapp_version)]
@@ -72,8 +73,9 @@ backend ex_apps_backend
 
 backend ex_apps_backend_w_bruteforce
     mode http
-    server frp_server 127.0.0.1
+    server frp_server 0.0.0.0
     http-request set-path %[var(txn.exapps.target_path)]
+    http-request set-dst var(txn.exapps.target_ip)
     http-request set-dst-port var(txn.exapps.target_port)
     http-request set-header EX-APP-ID %[var(txn.exapps.exapp_id)]
     http-request set-header EX-APP-VERSION %[var(txn.exapps.exapp_version)]
