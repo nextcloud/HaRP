@@ -181,6 +181,7 @@ else
   # If we do not have a SSL cert for HAProxy, comment out the HTTPS frontends
   if [ -f "/certs/cert.pem" ]; then
     log "INFO: Found /certs/cert.pem, HTTPS frontends remain enabled."
+    sed -i "/_HTTPS_FRONTEND_/ s|_HTTPS_FRONTEND_ ||g" /haproxy.cfg
     chmod 644 /certs/cert.pem
   else
     log "INFO: No /certs/cert.pem found, disabling HTTPS frontends..."
