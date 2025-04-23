@@ -211,20 +211,20 @@ For remote or external Docker Engines - or if you prefer not to mount the Docker
 
    ```toml
    # frpc.toml
-   serverAddr = "your.harp.server.address"   # Replace with your HP_FRP_ADDRESS host
-   serverPort = 8782                         # Default port for FRP
-   loginFailExit = false                     # If the FRP (HaRP) server is unavailable, continue trying to log in.
+   serverAddr = "your.harp.server.address"          # Replace with your HP_FRP_ADDRESS host
+   serverPort = 8782                                # Default port for FRP or the port your reverse proxy listens on
+   loginFailExit = false                            # If the FRP (HaRP) server is unavailable, continue trying to log in.
 
    transport.tls.certFile = "certs/frp/client.crt"
    transport.tls.keyFile = "certs/frp/client.key"
    transport.tls.trustedCaFile = "certs/frp/ca.crt"
-   transport.tls.serverName = "harp.nc"
+   transport.tls.serverName = "harp.nc"             # DO NOT CHANGE THIS VALUE
 
-   metadatas.token = "HP_SHARED_KEY"         # HP_SHARED_KEY in quotes
+   metadatas.token = "HP_SHARED_KEY"                # HP_SHARED_KEY in quotes
 
    [[proxies]]
-   remotePort = 24001                        # Unique remotePort for each Docker Engine (range: 24001-24099)
-   name = "deploy-daemon"                    # Unique name for each Docker Engine
+   remotePort = 24001                               # Unique remotePort for each Docker Engine (range: 24001-24099)
+   name = "deploy-daemon-1"                         # Unique name for each Docker Engine
    type = "tcp"
    [proxies.plugin]
    type = "unix_domain_socket"
@@ -233,6 +233,36 @@ For remote or external Docker Engines - or if you prefer not to mount the Docker
 
 3. **Deploy the FRP Client:**
    Run the FRP client on the host with the Docker Engine using the configuration file. This establishes a secure tunnel between the remote Docker Engine and HaRP. Each connection requires a unique `remotePort` value; HaRP supports up to 99 Docker Engines by assigning a different port in the allowed range.
+
+   Run like this:
+
+   ```bash
+    frpc -c /path/to/frpc.toml
+   ```
+
+   Or with docker:
+
+   ```bash
+   docker run \
+     -v /path/to/frpc.toml:/etc/frpc.toml \
+     -v /var/run/docker.sock:/var/run/docker.sock \
+     --restart unless-stopped \
+     -- ghcr.io/fatedier/frpc:v0.61.1 "-c=/etc/frpc.toml"
+   ```
+
+You may want to run the FRP client-server connections through the same reverse proxy as the Nextcloud instance for better security. The following is an example of how to configure NGINX for this purpose:
+
+```nginx
+  stream {
+      server {
+          listen 8782;  # Replace with the port you want to listen on
+          proxy_pass 127.0.0.1:8782;
+          proxy_protocol off;
+          proxy_connect_timeout 10s;
+          proxy_timeout 300s;
+      }
+  }
+```
 
 ## Adapting ExApps to use HaRP
 
