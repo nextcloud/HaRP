@@ -60,6 +60,6 @@ if [ -f /frpc.toml ] && [ -n "$HP_SHARED_KEY" ]; then
     frpc -c /frpc.toml &
 fi
 
-# Start the main application (adjust it for your ExApp)
-echo "Starting main application..."
-exec python3 main.py
+# Start the main application (launch cmd for ExApp is an argument for this script)
+echo "Starting application: $@"
+exec "$@"
