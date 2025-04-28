@@ -270,9 +270,10 @@ You may want to run the FRP client-server connections through the same reverse p
 >
 > Adding `HaRP` support is fully compatible with the existing `DSP` system, so you won’t need to maintain two separate release types of your ExApp.
 
-1. Copy the `start.sh` script from the `exapps_dev` folder of this repository and set it as the entry point in your ExApp’s `Dockerfile`.
-2. After copying `start.sh`, edit its last line so that it runs your ExApp’s main binary (or script).
-3. Add the following lines to your `Dockerfile` to automatically include the `FRP client` binaries in your Docker image:
+1. Copy the `start.sh` script from the `exapps_dev` folder of the HaRP repository into your Docker image (e.g., using a `COPY` instruction).
+2. In your ExApp's `Dockerfile`, set the `ENTRYPOINT` to execute `start.sh` followed by the **command and arguments required to launch** your actual application. The `start.sh` script will perform launch of `FRP` client if needed and then use `exec` to run the command you provide as arguments.
+3. Ensure the `curl` command-line utility is installed in your ExApp's Docker image, as it's needed by the following script to download the FRP client.
+4. Add the following lines to your `Dockerfile` to automatically include the `FRP client` binaries in your Docker image:
 
     ```bash
     # Download and install FRP client
@@ -294,7 +295,7 @@ You may want to run the FRP client-server connections through the same reverse p
 
     > **Note:** For `Alpine 3.21` Linux you can just install `FRP` from repo using `apk add frp` command.
 
-That's it!
+That's it! Your ExApp is now adapted to Nextcloud 32.
 
 ## Nextcloud 32: Migrating Existing ExApps from DSP to HaRP
 
