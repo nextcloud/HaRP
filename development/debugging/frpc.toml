@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2025 Nextcloud GmbH and Nextcloud contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+serverAddr = "127.0.0.1"                         # Replace with your HP_FRP_ADDRESS host
+serverPort = 8782                                # Default port for FRP or the port your reverse proxy listens on
+loginFailExit = false                            # If the FRP (HaRP) server is unavailable, continue trying to log in.
+
+metadatas.token = "some_very_secure_password"
+
+log.level = "info"
+
+[[proxies]]
+remotePort = 24000                               # we set it to 24000 as it is the basic Docker Engine
+name = "bundled-deploy-daemon"                   # Unique name for each Docker Engine
+type = "tcp"
+[proxies.plugin]
+type = "unix_domain_socket"
+unixPath = "/var/run/docker.sock"
