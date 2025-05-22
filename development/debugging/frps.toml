@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2025 Nextcloud GmbH and Nextcloud contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+bindAddr = "127.0.0.1"
+bindPort = 8782
+
+transport.tls.force = false
+
+log.level = "info"
+
+maxPortsPerClient = 1
+allowPorts = [
+  { start = 23000, end = 23999 },
+  { start = 24000, end = 24099 }
+]
+
+[[httpPlugins]]
+addr = "127.0.0.1:8200"
+path = "/frp_handler"
+ops = ["Login"]
