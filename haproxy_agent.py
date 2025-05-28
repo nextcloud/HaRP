@@ -1239,69 +1239,9 @@ async def docker_exapp_install_certificates(request: web.Request):
             LOGGER.info("OS Info for container '%s':\n%s", container_name, os_info_content.strip())
 
             if payload.system_certs_bundle:
-                target_cert_dir = _get_target_cert_dir(os_info_content)
-                if target_cert_dir:
-                    LOGGER.info("Target system cert directory for container '%s': %s", container_name, target_cert_dir)
-                    exit_code, raw_output = await _execute_command_in_container_simplified(
-                        session, docker_engine_port, container_name, ["mkdir", "-p", target_cert_dir]
-                    )
-                    if exit_code != 0:
-                        LOGGER.error(
-                            "Failed to create cert dir '%s' in container '%s'. Exit: %s, Raw Output: %s",
-                            target_cert_dir,
-                            container_name,
-                            exit_code,
-                            raw_output,
-                        )
-                        raise web.HTTPInternalServerError(
-                            text=f"Failed to create cert directory. Exit: {exit_code}. Output: {raw_output[:200]}"
-                        )
-
-                    certs_to_install = {}
-                    parsed_certs = _parse_certs_from_bundle(payload.system_certs_bundle)
-                    for i, cert_content in enumerate(parsed_certs):
-                        cert_filename = f"custom_ca_cert_{i}.crt"
-                        certs_to_install[os.path.join(target_cert_dir.lstrip("/"), cert_filename)] = cert_content
-
-                    if certs_to_install:
-                        tar_bytes = _create_tar_archive_in_memory(certs_to_install)
-                        await _put_archive_to_container(session, docker_engine_port, container_name, "/", tar_bytes)
-                        LOGGER.info(
-                            "Installed %d system CA certificates into '%s' in container '%s'.",
-                            len(parsed_certs),
-                            target_cert_dir,
-                            container_name,
-                        )
-
-                        update_cmd_list = _get_certificate_update_command(os_info_content)
-                        if update_cmd_list:
-                            LOGGER.info("Running certificate update command: %s", " ".join(update_cmd_list))
-                            exit_code, raw_output = await _execute_command_in_container_simplified(
-                                session, docker_engine_port, container_name, update_cmd_list
-                            )
-                            if exit_code != 0:
-                                LOGGER.error(
-                                    "Certificate update command failed in container '%s'. Exit: %s, Raw Output: %s",
-                                    container_name,
-                                    exit_code,
-                                    raw_output,
-                                )
-                            else:
-                                LOGGER.info("Certificate update command successful. Raw Output: %s", raw_output.strip())
-                        else:
-                            LOGGER.warning(
-                                "No certificate update command found for OS in container '%s'.", container_name
-                            )
-                    else:
-                        LOGGER.info(
-                            "No individual certificates parsed from system_certs_bundle for container '%s'.",
-                            container_name,
-                        )
-                else:
-                    LOGGER.warning(
-                        "OS in container '%s' not supported for sys cert installation, or bundle empty. Skipping.",
-                        container_name,
-                    )
+                await _install_system_certificates(
+                    session, docker_engine_port, container_name, payload.system_certs_bundle, os_info_content
+                )
             else:
                 LOGGER.info(
                     "No system_certs_bundle provided for container '%s'. Skipping system cert installation.",
@@ -1345,6 +1285,76 @@ async def docker_exapp_install_certificates(request: web.Request):
                             )
                 except Exception as e_stop:
                     LOGGER.error("Error stopping container '%s' in finally block: %s", container_name, e_stop)
+
+
+async def _install_system_certificates(
+    session: aiohttp.ClientSession,
+    docker_engine_port: int,
+    container_name: str,
+    system_certs_bundle: str,
+    os_info_content: str,
+) -> None:
+    target_cert_dir = _get_target_cert_dir(os_info_content)
+    if target_cert_dir:
+        LOGGER.info("Target system cert directory for container '%s': %s", container_name, target_cert_dir)
+        exit_code, raw_output = await _execute_command_in_container_simplified(
+            session, docker_engine_port, container_name, ["mkdir", "-p", target_cert_dir]
+        )
+        if exit_code != 0:
+            LOGGER.error(
+                "Failed to create cert dir '%s' in container '%s'. Exit: %s, Raw Output: %s",
+                target_cert_dir,
+                container_name,
+                exit_code,
+                raw_output,
+            )
+            raise web.HTTPInternalServerError(
+                text=f"Failed to create cert directory. Exit: {exit_code}. Output: {raw_output[:200]}"
+            )
+
+        certs_to_install = {}
+        parsed_certs = _parse_certs_from_bundle(system_certs_bundle)
+        for i, cert_content in enumerate(parsed_certs):
+            cert_filename = f"custom_ca_cert_{i}.crt"
+            certs_to_install[os.path.join(target_cert_dir.lstrip("/"), cert_filename)] = cert_content
+
+        if certs_to_install:
+            tar_bytes = _create_tar_archive_in_memory(certs_to_install)
+            await _put_archive_to_container(session, docker_engine_port, container_name, "/", tar_bytes)
+            LOGGER.info(
+                "Installed %d system CA certificates into '%s' in container '%s'.",
+                len(parsed_certs),
+                target_cert_dir,
+                container_name,
+            )
+
+            update_cmd_list = _get_certificate_update_command(os_info_content)
+            if update_cmd_list:
+                LOGGER.info("Running certificate update command: %s", " ".join(update_cmd_list))
+                exit_code, raw_output = await _execute_command_in_container_simplified(
+                    session, docker_engine_port, container_name, update_cmd_list
+                )
+                if exit_code != 0:
+                    LOGGER.error(
+                        "Certificate update command failed in container '%s'. Exit: %s, Raw Output: %s",
+                        container_name,
+                        exit_code,
+                        raw_output,
+                    )
+                else:
+                    LOGGER.info("Certificate update command successful. Raw Output: %s", raw_output.strip())
+            else:
+                LOGGER.warning("No certificate update command found for OS in container '%s'.", container_name)
+        else:
+            LOGGER.info(
+                "No individual certificates parsed from system_certs_bundle for container '%s'.",
+                container_name,
+            )
+    else:
+        LOGGER.warning(
+            "OS in container '%s' not supported for sys cert installation, or bundle empty. Skipping.",
+            container_name,
+        )
 
 
 async def _install_frp_certificates(
