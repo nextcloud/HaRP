@@ -111,7 +111,9 @@ class CreateExAppPayload(ExAppName):
     network_mode: str = Field(..., description="Desired NetworkMode for the container.")
     environment_variables: list[str] = Field([], description="ExApp environment variables.")
     restart_policy: str = Field("unless-stopped", description="Desired RestartPolicy for the container.")
-    compute_device: Literal["cpu", "rocm", "cuda"] = Field("cpu", description="Possible values: 'cpu', 'rocm' or 'cuda'")
+    compute_device: Literal["cpu", "rocm", "cuda"] = Field(
+        "cpu", description="Possible values: 'cpu', 'rocm' or 'cuda'"
+    )
     mount_points: list[CreateExAppMounts] = Field([], description="List of mount points for the container.")
 
 
@@ -1305,76 +1307,7 @@ async def docker_exapp_install_certificates(request: web.Request):
                 )
 
             if payload.install_frp_certs:
-                frp_cert_dir_on_harp = "/certs/frp"
-                frp_target_dir_in_container = "/certs/frp"
-
-                frp_files_to_read = {
-                    "ca.crt": os.path.join(frp_cert_dir_on_harp, "ca.crt"),
-                    "client.crt": os.path.join(frp_cert_dir_on_harp, "client.crt"),
-                    "client.key": os.path.join(frp_cert_dir_on_harp, "client.key"),
-                }
-                frp_certs_content = {}
-                all_frp_files_exist = True
-                for name, path_on_harp in frp_files_to_read.items():
-                    if os.path.exists(path_on_harp):
-                        try:
-                            with open(path_on_harp, encoding="utf-8") as f:
-                                frp_certs_content[name] = f.read()
-                        except Exception as e_read:
-                            LOGGER.error("Failed to read FRP cert file '%s' from HaRP agent: %s", path_on_harp, e_read)
-                            all_frp_files_exist = False
-                            break
-                    else:
-                        LOGGER.warning(
-                            "FRP certificate file '%s' not found on HaRP agent. Skipping FRP cert installation.",
-                            path_on_harp,
-                        )
-                        all_frp_files_exist = False
-                        break
-
-                if all_frp_files_exist and frp_certs_content:
-                    LOGGER.info(
-                        "Installing FRP certificates from HaRP agent into '%s' in container '%s'.",
-                        frp_target_dir_in_container,
-                        container_name,
-                    )
-                    exit_code, raw_output = await _execute_command_in_container_simplified(
-                        session, docker_engine_port, container_name, ["mkdir", "-p", frp_target_dir_in_container]
-                    )
-                    if exit_code != 0:
-                        LOGGER.error(
-                            "Failed to create FRP cert dir '%s' in container '%s'. Exit: %s, Raw Output: %s",
-                            frp_target_dir_in_container,
-                            container_name,
-                            exit_code,
-                            raw_output,
-                        )
-                        raise web.HTTPInternalServerError(
-                            text=f"Failed to create FRP cert directory. Exit: {exit_code}. Output: {raw_output[:200]}"
-                        )
-
-                    frp_files_for_tar = {
-                        os.path.join(frp_target_dir_in_container.lstrip("/"), "ca.crt"): frp_certs_content["ca.crt"],
-                        os.path.join(frp_target_dir_in_container.lstrip("/"), "client.crt"): frp_certs_content[
-                            "client.crt"
-                        ],
-                        os.path.join(frp_target_dir_in_container.lstrip("/"), "client.key"): frp_certs_content[
-                            "client.key"
-                        ],
-                    }
-                    tar_bytes_frp = _create_tar_archive_in_memory(frp_files_for_tar)
-                    await _put_archive_to_container(session, docker_engine_port, container_name, "/", tar_bytes_frp)
-                    LOGGER.info("FRP certificates installed successfully into '%s'.", frp_target_dir_in_container)
-                elif not all_frp_files_exist:
-                    LOGGER.info(
-                        "One or more FRP cert files missing, skipping FRP installation for container '%s'",
-                        container_name,
-                    )
-                else:
-                    LOGGER.warning(
-                        "FRP cert content is empty. Skipping FRP installation for '%s'",
-                        container_name,
-                    )
+                await _install_frp_certificates(session, docker_engine_port, container_name)
             else:
                 LOGGER.info(
                     "install_frp_certs is false. Skipping FRP cert installation for container '%s'.", container_name
@@ -1410,6 +1343,77 @@ async def docker_exapp_install_certificates(request: web.Request):
                             )
                 except Exception as e_stop:
                     LOGGER.error("Error stopping container '%s' in finally block: %s", container_name, e_stop)
+
+
+async def _install_frp_certificates(
+    session: aiohttp.ClientSession, docker_engine_port: int, container_name: str
+) -> None:
+    frp_cert_dir_on_harp = "/certs/frp"
+    frp_target_dir_in_container = "/certs/frp"
+
+    frp_files_to_read = {
+        "ca.crt": os.path.join(frp_cert_dir_on_harp, "ca.crt"),
+        "client.crt": os.path.join(frp_cert_dir_on_harp, "client.crt"),
+        "client.key": os.path.join(frp_cert_dir_on_harp, "client.key"),
+    }
+    frp_certs_content = {}
+    all_frp_files_exist = True
+    for name, path_on_harp in frp_files_to_read.items():
+        if os.path.exists(path_on_harp):
+            try:
+                with open(path_on_harp, encoding="utf-8") as f:
+                    frp_certs_content[name] = f.read()
+            except Exception as e_read:
+                LOGGER.error("Failed to read FRP cert file '%s' from HaRP agent: %s", path_on_harp, e_read)
+                all_frp_files_exist = False
+                break
+        else:
+            LOGGER.warning(
+                "FRP certificate file '%s' not found on HaRP agent. Skipping FRP cert installation.",
+                path_on_harp,
+            )
+            all_frp_files_exist = False
+            break
+
+    if all_frp_files_exist and frp_certs_content:
+        LOGGER.info(
+            "Installing FRP certificates from HaRP agent into '%s' in container '%s'.",
+            frp_target_dir_in_container,
+            container_name,
+        )
+        exit_code, raw_output = await _execute_command_in_container_simplified(
+            session, docker_engine_port, container_name, ["mkdir", "-p", frp_target_dir_in_container]
+        )
+        if exit_code != 0:
+            LOGGER.error(
+                "Failed to create FRP cert dir '%s' in container '%s'. Exit: %s, Raw Output: %s",
+                frp_target_dir_in_container,
+                container_name,
+                exit_code,
+                raw_output,
+            )
+            raise web.HTTPInternalServerError(
+                text=f"Failed to create FRP cert directory. Exit: {exit_code}. Output: {raw_output[:200]}"
+            )
+
+        frp_files_for_tar = {
+            os.path.join(frp_target_dir_in_container.lstrip("/"), "ca.crt"): frp_certs_content["ca.crt"],
+            os.path.join(frp_target_dir_in_container.lstrip("/"), "client.crt"): frp_certs_content["client.crt"],
+            os.path.join(frp_target_dir_in_container.lstrip("/"), "client.key"): frp_certs_content["client.key"],
+        }
+        tar_bytes_frp = _create_tar_archive_in_memory(frp_files_for_tar)
+        await _put_archive_to_container(session, docker_engine_port, container_name, "/", tar_bytes_frp)
+        LOGGER.info("FRP certificates installed successfully into '%s'.", frp_target_dir_in_container)
+    elif not all_frp_files_exist:
+        LOGGER.info(
+            "One or more FRP cert files missing, skipping FRP installation for container '%s'",
+            container_name,
+        )
+    else:
+        LOGGER.warning(
+            "FRP cert content is empty. Skipping FRP installation for '%s'",
+            container_name,
+        )
 
 
 def _create_tar_archive_in_memory(files_to_add: dict[str, str]) -> bytes:
