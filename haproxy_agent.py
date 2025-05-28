@@ -627,11 +627,13 @@ async def docker_exapp_create(request: web.Request):
         container_config["NetworkingConfig"] = {"EndpointsConfig": {payload.network_mode: {"Aliases": [payload.name]}}}
 
     if payload.compute_device == "cuda":
-        container_config["HostConfig"]["DeviceRequests"] = {
-            "Driver": "nvidia",
-            "Count": -1,
-            "Capabilities": [["compute", "utility"]],
-        }
+        container_config["HostConfig"]["DeviceRequests"] = [
+            {
+                "Driver": "nvidia",
+                "Count": -1,
+                "Capabilities": [["compute", "utility"]],
+            }
+        ]
     elif payload.compute_device == "rocm":
         devices = []
         for device in ("/dev/kfd", "/dev/dri"):
