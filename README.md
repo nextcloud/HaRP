@@ -346,6 +346,39 @@ docker run \
   -d nextcloud-appapi-harp:local
 ```
 
+#### Debugging HaRP
+
+##### One time initializing steps:
+
+1. Create virtual environment
+2. Install `pydantic` (you can look at exact version in the **Dockerfile*) and `git+https://github.com/cloud-py-api/haproxy-python-spoa.git`
+3. Set next environment variables for running `haproxy_agent.py` script:
+    ```
+    HP_LOG_LEVEL=info;NC_INSTANCE_URL=http://nextcloud.local;HP_SHARED_KEY=some_very_secure_password;HP_FRP_DISABLE_TLS=true
+    ```
+4. Create folder `dev` at the root of repository, extract there content of the desired archive with the [FRP](https://github.com/fatedier/frp/releases/latest) archive which is located at `exapps_dev` folder of this repo.
+5. Edit the `data/nginx/vhost.d/nextcloud.local_location` file from the `nextcloud-docker-dev` to point `/exapps/` web route to the host:
+    ```
+    proxy_pass http://172.17.0.1:8780;
+    ```
+
+    > **Note:** my original content from my dev machine of file `nextcloud.local_location`:
+    > ```nginx
+    > location /exapps/ {
+    >   proxy_pass http://172.17.0.1:8780;
+    > }
+    > ```
+6. Use `docker compose up -d --force-recreate proxy` command from Julius `nextcloud-docker-dev` to recreate the proxy container.
+7. Register `HaRP` from the **Host** template. Replace `localhost` with `host.docker.internal` in `HaRP Host` field.
+
+##### Steps to run all parts of HaRP after initializing:
+
+1. Run FRP Server with `./dev/frps -c ./development/debugging/frps.toml` command.
+2. Run the FRP Client to connect Docker Engine to the FRP Server with `./dev/frpc -c ./development/debugging/frpc.toml` command.
+3. Run `./development/debugging/redeploy_haproxy_host.sh` command to redeploy `appapi-harp` container **with HaProxy only**.
+
+> **Note:** Existing `appapi-harp` container will be removed.
+
 ## Contributing
 
 Contributions to HaRP are welcome. Feel free to open issues, discussions or submit pull requests with improvements, bug fixes, or new features.
