@@ -465,6 +465,15 @@ def resolve_ip(hostname: str) -> str:
 
 
 ###############################################################################
+# Misc routes
+###############################################################################
+
+
+async def get_info(request: web.Request):
+    return web.json_response({"version": 0.2})
+
+
+###############################################################################
 # ExApp routes
 ###############################################################################
 
@@ -1607,6 +1616,8 @@ def _get_certificate_update_command(os_info_content: str | None) -> list[str] | 
 
 def create_web_app() -> web.Application:
     app = web.Application()
+
+    app.router.add_get("/info", get_info)
 
     # ExApp routes
     app.router.add_post("/exapp_storage/{app_id}", add_exapp)
