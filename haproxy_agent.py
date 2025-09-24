@@ -17,7 +17,7 @@ import time
 from base64 import b64encode
 from enum import IntEnum
 from ipaddress import IPv4Address, IPv6Address, ip_address
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 import aiohttp
 from aiohttp import web
@@ -115,6 +115,7 @@ class CreateExAppPayload(ExAppName):
         "cpu", description="Possible values: 'cpu', 'rocm' or 'cuda'"
     )
     mount_points: list[CreateExAppMounts] = Field([], description="List of mount points for the container.")
+    resource_limits: dict[str, Any] = Field({}, description="Resource limits for the container.")
 
 
 class RemoveExAppPayload(ExAppName):
@@ -648,6 +649,12 @@ async def docker_exapp_create(request: web.Request):
         for device in ("/dev/kfd", "/dev/dri"):
             devices.append({"PathOnHost": device, "PathInContainer": device, "CgroupPermissions": "rwm"})
         container_config["HostConfig"]["Devices"] = devices
+
+    if payload.resource_limits:
+        if "memory" in payload.resource_limits:
+            container_config["HostConfig"]["Memory"] = payload.resource_limits["memory"]
+        if "nanoCPUs" in payload.resource_limits:
+            container_config["HostConfig"]["NanoCPUs"] = payload.resource_limits["nanoCPUs"]
 
     for extra_mount in payload.mount_points:
         container_config["HostConfig"]["Mounts"].append(
