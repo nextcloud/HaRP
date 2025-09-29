@@ -23,7 +23,7 @@
 #  - HP_SHARED_KEY or HP_SHARED_KEY_FILE must be provided at runtime.
 # -------------------------------------------------------------------------
 
-FROM haproxy:3.1.2-alpine3.21
+FROM docker.io/library/haproxy:3.1.2-alpine3.21
 
 USER root
 
