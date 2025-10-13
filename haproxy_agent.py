@@ -44,6 +44,18 @@ EXCLUDE_HEADERS_USER_INFO = {"host", "content-length"}
 SPOA_AGENT = SpoaServer()
 DOCKER_API_HOST = "127.0.0.1"
 
+TRUSTED_PROXIES_STR = os.environ.get("HP_TRUSTED_PROXY_IPS", "")
+TRUSTED_PROXIES = []
+if TRUSTED_PROXIES_STR:
+    try:
+        TRUSTED_PROXIES = [
+            ipaddress.ip_network(proxy.strip()) for proxy in TRUSTED_PROXIES_STR.split(",") if proxy.strip()
+        ]
+        LOGGER.info("Trusting reverse proxies for client IP detection: %s", [str(p) for p in TRUSTED_PROXIES])
+    except ValueError as e:
+        LOGGER.error("Invalid value for HP_TRUSTED_PROXY_IPS: %s. This feature will be disabled.", e)
+        TRUSTED_PROXIES = []
+
 ###############################################################################
 # Definitions
 ###############################################################################
@@ -155,6 +167,36 @@ BLACKLIST_MAX_FAILS_COUNT = int(os.getenv("HP_BLACKLIST_COUNT", "10"))
 ###############################################################################
 
 
+def get_true_client_ip(
+    direct_ip: ipaddress.IPv4Address | ipaddress.IPv6Address, headers: dict[str, str]
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Determine the true client IP by inspecting headers from trusted proxies."""
+    if not TRUSTED_PROXIES:
+        return direct_ip
+
+    is_trusted = any(direct_ip in network for network in TRUSTED_PROXIES)
+    if not is_trusted:
+        return direct_ip
+
+    # The request is from a trusted proxy, so we can check the headers.
+    # X-Forwarded-For can be a list: client, proxy1, proxy2. We want the first one.
+    x_forwarded_for = headers.get("x-forwarded-for")
+    if x_forwarded_for:
+        true_ip_str = x_forwarded_for.split(",")[0].strip()
+        try:
+            return ipaddress.ip_address(true_ip_str)
+        except ValueError:
+            LOGGER.warning("Could not parse IP from X-Forwarded-For header: %s", true_ip_str)
+
+    x_real_ip = headers.get("x-real-ip")
+    if x_real_ip:
+        try:
+            return ipaddress.ip_address(x_real_ip)
+        except ValueError:
+            LOGGER.warning("Could not parse IP from X-Real-IP header: %s", x_real_ip)
+    return direct_ip  # If headers are present but invalid, fall back to the direct IP of the proxy
+
+
 async def record_ip_failure(ip_address: str | IPv4Address | IPv6Address) -> None:
     """Record a failed request attempt for this IP using BLACKLIST_CACHE."""
     ip_str = str(ip_address)
@@ -165,7 +207,7 @@ async def record_ip_failure(ip_address: str | IPv4Address | IPv6Address) -> None
         attempts = [ts for ts in attempts if now - ts < BLACKLIST_REQUEST_WINDOW]
         attempts.append(now)
         BLACKLIST_CACHE[ip_str] = attempts
-        LOGGER.debug("Recorded failure for IP %s. Failures in window: %d", ip_str, len(attempts))
+        LOGGER.warning("Recorded failure for IP %s. Failures in window: %d", ip_str, len(attempts))
 
 
 async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
@@ -219,8 +261,10 @@ async def get_session(pass_cookie: str) -> NcUser | None:
 async def exapps_msg(
     path: str, headers: str, client_ip: ipaddress.IPv4Address | ipaddress.IPv6Address, pass_cookie: str
 ) -> AckPayload:
-    client_ip_str = str(client_ip)
     reply = AckPayload()
+    request_headers = parse_headers(headers)
+    client_ip_str = str(get_true_client_ip(client_ip, request_headers))
+    reply = reply.set_txn_var("true_client_ip", client_ip_str)
     LOGGER.debug("Incoming request to ExApp: path=%s, headers=%s, ip=%s", path, headers, client_ip_str)
 
     # Check if the IP is banned based on failed attempts in BLACKLIST_CACHE.
@@ -237,8 +281,6 @@ async def exapps_msg(
     exapp_id_lower = exapp_id.lower()
     target_path = path.removeprefix(f"/exapps/{exapp_id}")
     reply = reply.set_txn_var("target_path", target_path)
-
-    request_headers = parse_headers(headers)
 
     # Special handling for AppAPI requests
     if exapp_id == "app_api":
@@ -366,18 +408,15 @@ async def exapps_msg(
 
 
 @SPOA_AGENT.handler("exapps_response_status_msg")
-async def exapps_response_status_msg(
-    status: int, client_ip: ipaddress.IPv4Address | ipaddress.IPv6Address, statuses_to_trigger_bp: str
-) -> AckPayload:
+async def exapps_response_status_msg(status: int, client_ip: str, statuses_to_trigger_bp: str) -> AckPayload:
     reply = AckPayload()
     if not statuses_to_trigger_bp:
         return reply.set_txn_var("bp_triggered", 0)
     statuses = json.loads(statuses_to_trigger_bp)
     if status not in statuses:
         return reply.set_txn_var("bp_triggered", 0)
-    str_client_ip = str(client_ip)
-    LOGGER.warning("Bruteforce protection(status=%s) triggered IP=%s.", status, str_client_ip)
-    await record_ip_failure(str_client_ip)
+    LOGGER.warning("Bruteforce protection(status=%s) triggered IP=%s.", status, client_ip)
+    await record_ip_failure(client_ip)
     return reply.set_txn_var("bp_triggered", 1)
 
 

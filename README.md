@@ -136,6 +136,11 @@ HaRP is configured via several environment variables. Here are the key variables
     - `HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781"`
   - **Note:** Must be reachable by your reverse proxy.
 
+- **`HP_TRUSTED_PROXY_IPS`**
+  - **Description:** A comma-separated list of trusted reverse proxy IP addresses or CIDR ranges. When HaRP is behind another reverse proxy (like NGINX), set this to the IP of that proxy to allow HaRP to correctly identify the true client IP from `X-Forwarded-For` or `X-Real-IP` headers.
+  - **Default:** `""` (disabled)
+  - **Example:** `"172.18.0.0/16,127.0.0.1"`
+
 - **`HP_FRP_ADDRESS`**
   - **Description:** IP:Port for the FRP (TCP) frontends.
   - **Default:** `HP_FRP_ADDRESS="0.0.0.0:8782"`
@@ -336,6 +341,7 @@ docker run \
   -e NC_INSTANCE_URL="http://nextcloud.local" \
   -e HP_LOG_LEVEL="debug" \
   -e HP_VERBOSE_START="1" \
+  -e HP_TRUSTED_PROXY_IPS="192.168.0.0/16" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v `pwd`/certs:/certs \
   --name appapi-harp -h appapi-harp \
