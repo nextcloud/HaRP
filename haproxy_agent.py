@@ -53,7 +53,12 @@ if TRUSTED_PROXIES_STR:
         ]
         LOGGER.info("Trusting reverse proxies for client IP detection: %s", [str(p) for p in TRUSTED_PROXIES])
     except ValueError as e:
-        LOGGER.error("Invalid value for HP_TRUSTED_PROXY_IPS: %s. This feature will be disabled.", e)
+        LOGGER.error(
+            "Invalid value for HP_TRUSTED_PROXY_IPS: %s. Client IP detection from headers is disabled. "
+            "The X-Forwarded-For and X-Real-IP headers will not be respected. "
+            "This can lead to the outer proxy's IP being blocked during a bruteforce attempt instead of the actual client's IP.",
+            e,
+        )
         TRUSTED_PROXIES = []
 
 ###############################################################################

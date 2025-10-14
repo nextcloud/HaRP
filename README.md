@@ -352,6 +352,9 @@ docker run \
   -d nextcloud-appapi-harp:local
 ```
 
+> [!important]
+> Be mindful of checking and changing the environment variables `HP_SHARED_KEY`, `NC_INSTANCE_URL`, and `HP_TRUSTED_PROXY_IPS` in the above command to suit your environment and setup.
+
 #### Debugging HaRP
 
 ##### One time initializing steps:
