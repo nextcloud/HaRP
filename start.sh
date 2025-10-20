@@ -70,6 +70,30 @@ wait_for_http() {
     done
 }
 
+# ----------------------------------------------------------------------------
+# Resolve HP_SHARED_KEY once for the whole process (env or file)
+# ----------------------------------------------------------------------------
+if [ -n "$HP_SHARED_KEY" ] && [ -n "$HP_SHARED_KEY_FILE" ]; then
+    echo "ERROR: Only one of HP_SHARED_KEY or HP_SHARED_KEY_FILE should be specified."
+    exit 1
+fi
+if [ -z "$HP_SHARED_KEY" ] && [ -n "$HP_SHARED_KEY_FILE" ]; then
+    if [ ! -f "$HP_SHARED_KEY_FILE" ]; then
+        echo "ERROR: HP_SHARED_KEY_FILE is specified but the file does not exist."
+        exit 1
+    fi
+    if [ ! -s "$HP_SHARED_KEY_FILE" ]; then
+        echo "ERROR: HP_SHARED_KEY_FILE is specified but is empty."
+        exit 1
+    fi
+    HP_SHARED_KEY="$(cat "$HP_SHARED_KEY_FILE")"
+fi
+if [ -z "$HP_SHARED_KEY" ]; then
+    echo "ERROR: Either HP_SHARED_KEY or HP_SHARED_KEY_FILE must be set."
+    exit 1
+fi
+export HP_SHARED_KEY
+
 # Check if the required environment variables are set
 if [ -z "$HP_FRP_ADDRESS" ]; then
     echo "ERROR: HP_FRP_ADDRESS is not set."
@@ -187,32 +211,6 @@ if [ -f "/haproxy.cfg" ]; then
   log "INFO: /haproxy.cfg already present. Skipping config generation..."
 else
   log "INFO: Creating /haproxy.cfg from haproxy.cfg.template..."
-
-  if [ -n "$HP_SHARED_KEY_FILE" ] && [ ! -f "$HP_SHARED_KEY_FILE" ]; then
-    echo "ERROR: HP_SHARED_KEY_FILE is specified but the file does not exist."
-    exit 1
-  fi
-
-  if [ -n "$HP_SHARED_KEY" ] && [ -n "$HP_SHARED_KEY_FILE" ]; then
-    echo "ERROR: Only one of HP_SHARED_KEY or HP_SHARED_KEY_FILE should be specified."
-    exit 1
-  fi
-
-  if [ -n "$HP_SHARED_KEY_FILE" ]; then
-    if [ -s "$HP_SHARED_KEY_FILE" ]; then
-      HP_SHARED_KEY="$(cat "$HP_SHARED_KEY_FILE")"
-    else
-      echo "ERROR: HP_SHARED_KEY_FILE is specified but is empty."
-      exit 1
-    fi
-  elif [ -n "$HP_SHARED_KEY" ]; then
-    HP_SHARED_KEY="${HP_SHARED_KEY}"
-  else
-    echo "ERROR: Either HP_SHARED_KEY_FILE or HP_SHARED_KEY must be set."
-    exit 1
-  fi
-
-  export HP_SHARED_KEY
 
   # Use envsubst to render the main configuration.
   envsubst < /haproxy.cfg.template > /haproxy.cfg
