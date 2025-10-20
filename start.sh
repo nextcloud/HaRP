@@ -24,11 +24,31 @@ set -e
 #    We do not generate /certs/cert.pem file, as for HaProxy it is admin task to mount generated cert if needed.
 # ----------------------------------------------------------------------------
 
+HP_WAIT_FRP=${HP_WAIT_FRP:-30}
+HP_WAIT_INTERVAL=${HP_WAIT_INTERVAL:-0.5}
+
 HP_VERBOSE_START=${HP_VERBOSE_START:-1}
 log() {
     if [ "$HP_VERBOSE_START" -eq 1 ]; then
         echo "$@"
     fi
+}
+
+wait_for_tcp() {
+    # $1 host, $2 port, $3 timeout(s), $4 interval(s)
+    host="$1"; port="$2"; timeout="${3:-30}"; interval="${4:-0.5}"
+    start_ts="$(date +%s)"
+    while :; do
+        if nc -z -w 1 "$host" "$port" >/dev/null 2>&1; then
+            return 0
+        fi
+        now="$(date +%s)"; elapsed=$(( now - start_ts ))
+        if [ "$elapsed" -ge "$timeout" ]; then
+            echo "ERROR: Timeout waiting for TCP $host:$port to become ready (after ${timeout}s)."
+            return 1
+        fi
+        sleep "$interval"
+    done
 }
 
 # Check if the required environment variables are set
@@ -311,7 +331,11 @@ sleep 1s
 log "INFO: Starting FRP server on ${HP_FRP_ADDRESS}..."
 frps -c /frps.toml &
 
-sleep 1s
+# Wait for FRP port to be listening before starting frpc
+LOCAL_FRP_HOST="$FRP_HOST"
+[ "$LOCAL_FRP_HOST" = "0.0.0.0" ] && LOCAL_FRP_HOST="127.0.0.1"
+log "INFO: Waiting for FRP server port ${LOCAL_FRP_HOST}:${FRP_PORT}..."
+wait_for_tcp "$LOCAL_FRP_HOST" "$FRP_PORT" "$HP_WAIT_FRP" "$HP_WAIT_INTERVAL"
 
 if [ -e "/var/run/docker.sock" ]; then
   log "INFO: Starting FRP client for Docker Engine..."
