@@ -515,7 +515,7 @@ def resolve_ip(hostname: str) -> str:
 
 
 async def get_info(request: web.Request):
-    return web.json_response({"version": 0.2})
+    return web.json_response({"version": 0.3})
 
 
 ###############################################################################
