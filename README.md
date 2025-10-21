@@ -388,6 +388,63 @@ docker run \
 
 > **Note:** Existing `appapi-harp` container will be removed.
 
+## Troubleshooting
+
+### Verify that HaRP can reach the Docker Engine
+
+Use the Docker Engine `/_ping` endpoint via HaRP’s ExApps HTTP frontend to confirm connectivity:
+
+```
+curl -fsS \
+  -H "harp-shared-key: <HP_SHARED_KEY>" \
+  -H "docker-engine-port: 24000" \
+  http://127.0.0.1:8780/exapps/app_api/v1.41/_ping
+```
+
+* `24000` is the **default** FRP remote port used by the HaRP container for the **built‑in/local** Docker Engine (enabled when `/var/run/docker.sock` is mounted).
+* If you have connected **additional** Docker Engines via FRP, replace `24000` with the corresponding `remotePort` you configured (typically `24001–24099`).
+* A response body of `OK` means the Docker Engine API is reachable from HaRP.
+
+**Common outcomes**
+
+* `OK` – Success: HaRP can reach the Docker Engine on the given port.
+* `401 Unauthorized` – The `harp-shared-key` header does not match `HP_SHARED_KEY`.
+* `503 Service Unavailable` / `504 Gateway Timeout` – Wrong docker-engine-port, FRP tunnel is down, or the Docker Engine is not reachable.
+* Connection errors – The address in `HP_EXAPPS_ADDRESS` (port `8780` by default) is not reachable from where you ran curl.
+
+> **Note:** If you expose the ExApps frontend over HTTPS (via `HP_EXAPPS_HTTPS_ADDRESS` and a mounted `/certs/cert.pem`), use `https://...:8781` instead of `http://...:8780`.
+
+#### Verify Docker Engines from inside the HaRP container
+
+These checks run **inside the HaRP container** (e.g., `docker exec -it appapi-harp sh`).
+
+**1) Local Docker Engine (mapped socket)**
+
+   Confirm the host’s Docker socket is correctly mounted and reachable:
+
+   ```
+   # Directly against the mounted UNIX socket
+   curl -fsS --unix-socket /var/run/docker.sock http://localhost/_ping
+   # Expected: OK
+   ```
+
+   You can also verify the FRP tunnel that HaRP exposes for the bundled local engine (port 24000):
+
+   ```
+   curl -fsS http://127.0.0.1:24000/_ping
+   # Expected: OK
+   ```
+
+**2) Remote Docker Engine over FRP**
+
+   For each external Docker Engine you connected via FRP (each with a unique `remotePort`, typically **24001–24099**), test the TCP port that FRP exposes **on the HaRP container**:
+
+   ```
+   # Replace 24001 with the remotePort you configured in that engine's frpc.toml
+   curl -fsS http://127.0.0.1:24001/_ping
+   # Expected: OK
+   ```
+
 ## Contributing
 
 Contributions to HaRP are welcome. Feel free to open issues, discussions or submit pull requests with improvements, bug fixes, or new features.
