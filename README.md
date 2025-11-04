@@ -445,6 +445,41 @@ These checks run **inside the HaRP container** (e.g., `docker exec -it appapi-ha
    # Expected: OK
    ```
 
+### Verify that the Reverse Proxy configuration is correct
+
+Stop the HaRP container temporarily and start a dummy server with `nc` (netcat) to confirm that your reverse proxy is forwarding requests correctly with all the headers:
+
+```bash
+# Stop HaRP container
+docker stop appapi-harp
+# Start a dummy server on the same port as HaRP's ExApps frontend
+nc -l -k -p 8780
+```
+
+Now, send a request through your reverse proxy to the ExApps endpoint (e.g., `https://cloud.example.com/exapps/hello`):
+
+```bash
+curl -v https://cloud.example.com/exapps/hello
+```
+
+For nginx, you should see output similar to this in the terminal where `nc` is running:
+
+```
+GET /exapps/hello HTTP/1.1
+Host: cloud.example.com
+Connection: close
+X-Real-IP: 20.207.73.82
+X-Forwarded-For: 20.207.73.82 192.168.21.1
+X-Forwarded-Host: cloud.example.com
+X-Forwarded-Proto: https
+X-Forwarded-Ssl: on
+X-Forwarded-Port: 443
+X-Original-URI: /exapps/hello
+X-Forwarded-Proto: https
+user-agent: curl/8.11.1
+accept: */*
+```
+
 ## Contributing
 
 Contributions to HaRP are welcome. Feel free to open issues, discussions or submit pull requests with improvements, bug fixes, or new features.
