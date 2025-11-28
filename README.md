@@ -123,6 +123,13 @@ http:
 
 > **Note:** Replace `127.0.0.1` with the actual IP address of your HaRP container if it is running on a different host.
 
+### Cloudflare Tunneling Example
+![cloudflare-tunnel-1](assets/cloudflare-tunnel-1.png)
+
+![cloudflare-tunnel-2](assets/cloudflare-tunnel-2.png)
+
+> **Note:** The order of the routes matters, move the `exapp/*` route above your Nextcloud's main route.
+
 ---
 
 ## Environment Variables

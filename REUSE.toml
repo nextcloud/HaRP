@@ -20,3 +20,9 @@ precedence = "closest"
 SPDX-FileCopyrightText = "Fatedier <fatedier@gmail.com>"
 SPDX-License-Identifier = "Apache-2.0"
 comment = "Files originally taken from https://github.com/fatedier/frp"
+
+[[annotations]]
+path = ["assets/cloudflare-tunnel-1.png", "assets/cloudflare-tunnel-2.png"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2025 @edorain"
+SPDX-License-Identifier = "AGPL-3.0-or-later"
