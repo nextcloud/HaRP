@@ -244,6 +244,7 @@ if [ ! -f "/frps.toml" ]; then
 cat <<EOF >/frps.toml
 bindAddr = "${FRP_HOST}"
 bindPort = ${FRP_PORT}
+proxyBindAddr = "127.0.0.1"
 
 transport.tls.force = true
 transport.tls.certFile = "/certs/frp/server.crt"
@@ -269,6 +270,7 @@ EOF
 cat <<EOF >/frps.toml
 bindAddr = "${FRP_HOST}"
 bindPort = ${FRP_PORT}
+proxyBindAddr = "127.0.0.1"
 
 transport.tls.force = false
 
