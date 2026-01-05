@@ -28,6 +28,9 @@ from pydantic import BaseModel, Field, ValidationError, computed_field, model_va
 APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
 SHARED_KEY = os.environ.get("HP_SHARED_KEY")
 NC_INSTANCE_URL = os.environ.get("NC_INSTANCE_URL")
+SPOA_ADDRESS = os.environ.get("HP_SPOA_ADDRESS", "127.0.0.1:9600")
+SPOA_HOST, SPOA_PORT = SPOA_ADDRESS.rsplit(":", 1)
+SPOA_PORT = int(SPOA_PORT)
 # Set up the logging configuration
 LOG_LEVEL = os.environ["HP_LOG_LEVEL"].upper()
 logging.basicConfig(level=LOG_LEVEL)
@@ -1705,10 +1708,10 @@ async def run_http_server(host="127.0.0.1", port=8200):
 
 
 async def main():
-    spoa_task = asyncio.create_task(SPOA_AGENT._run(host="127.0.0.1", port=9600))  # noqa
+    spoa_task = asyncio.create_task(SPOA_AGENT._run(host=SPOA_HOST, port=SPOA_PORT))  # noqa
     http_task = asyncio.create_task(run_http_server(host="127.0.0.1", port=8200))
 
-    LOGGER.info("Starting both servers: SPOA on 127.0.0.1:9600, HTTP on 127.0.0.1:8200")
+    LOGGER.info("Starting both servers: SPOA on %s:%d, HTTP on 127.0.0.1:8200", SPOA_HOST, SPOA_PORT)
     await asyncio.gather(spoa_task, http_task)
 
 

@@ -7,6 +7,7 @@
 # This template is processed by envsubst in start.sh to replace variables:
 #   HP_EXAPPS_ADDRESS,
 #   HP_EXAPPS_HTTPS_ADDRESS,
+#   HP_SPOA_ADDRESS,
 #   HP_TIMEOUT_CONNECT,
 #   HP_TIMEOUT_CLIENT,
 #   HP_TIMEOUT_SERVER,
@@ -119,4 +120,4 @@ backend agents
     timeout connect 5s
     timeout server  3m
     option spop-check
-    server agent1 127.0.0.1:9600 check
+    server agent1 ${HP_SPOA_ADDRESS} check

@@ -6,7 +6,7 @@
 # healthcheck.sh
 #   - Validates HAProxy config syntax.
 #   - Checks if Python SPOE HTTP Control API is listening on 127.0.0.1:8200.
-#   - Checks if SPOE Agent is running on 127.0.0.1:9600.
+#   - Checks if SPOE Agent is running on HP_SPOA_ADDRESS (default 127.0.0.1:9600).
 #   - Checks FRP port at HP_FRP_ADDRESS.
 #   - Checks EXAPPS HTTP frontend, and also the EXAPPS HTTPS frontend if the /certs/cert.pem file exists.
 #
@@ -23,12 +23,6 @@ fi
 # 2) Check SPOE Agent Control API (Python HTTP) on 127.0.0.1:8200
 if ! nc -z 127.0.0.1 8200; then
   echo "ERROR: Data Plane API not responding on 127.0.0.1:8200"
-  exit 1
-fi
-
-# 3) Check SPOE Agent port on 127.0.0.1:9600
-if ! nc -z 127.0.0.1 9600; then
-  echo "ERROR: SPOE Agent not responding on 127.0.0.1:9600"
   exit 1
 fi
 
@@ -52,6 +46,9 @@ check_port () {
     exit 1
   fi
 }
+
+# 3) Check SPOE Agent port
+check_port "${HP_SPOA_ADDRESS:-127.0.0.1:9600}"
 
 # 4) Check FRP port
 check_port "${HP_FRP_ADDRESS:-0.0.0.0:8782}"

@@ -153,6 +153,11 @@ HaRP is configured via several environment variables. Here are the key variables
   - **Default:** `HP_FRP_ADDRESS="0.0.0.0:8782"`
   - **Note:** Should be accessible from where your ExApps are running.
 
+- **`HP_SPOA_ADDRESS`**
+  - **Description:** IP:Port for the internal SPOE agent that HAProxy uses for request authentication.
+  - **Default:** `HP_SPOA_ADDRESS="127.0.0.1:9600"`
+  - **Note:** Only change if port 9600 conflicts with another service.
+
 - **`HP_SHARED_KEY`** (or **`HP_SHARED_KEY_FILE`**)
   - **Description:** A secret token used for authentication between services.
   - **Requirement:** Must be set at runtime. Use only one of these methods.
