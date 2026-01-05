@@ -11,7 +11,7 @@ set -e
 #  - Reads HP_SHARED_KEY or HP_SHARED_KEY_FILE
 #  - Comments out HTTPS frontends if no /certs/cert.pem is found
 #  - Starts FRP server (frps) on HP_FRP_ADDRESS
-#  - Starts the Python SPOE agent on 127.0.0.1:9600
+#  - Starts the Python SPOE agent on HP_SPOA_ADDRESS
 #  - Launches Python SPOE HTTP Control API on 127.0.0.1:8200
 #  - Finally runs HAProxy in the foreground
 #
@@ -107,6 +107,11 @@ fi
 # Initialize FRP_HOST and FRP_PORT once to avoid parsing HP_FRP_ADDRESS multiple times.
 FRP_HOST="$(echo "$HP_FRP_ADDRESS" | cut -d':' -f1)"
 FRP_PORT="$(echo "$HP_FRP_ADDRESS" | cut -d':' -f2)"
+
+# Initialize SPOA_HOST and SPOA_PORT from HP_SPOA_ADDRESS (default 127.0.0.1:9600).
+HP_SPOA_ADDRESS="${HP_SPOA_ADDRESS:-127.0.0.1:9600}"
+SPOA_HOST="$(echo "$HP_SPOA_ADDRESS" | cut -d':' -f1)"
+SPOA_PORT="$(echo "$HP_SPOA_ADDRESS" | cut -d':' -f2)"
 
 # ----------------------------------------------------------------------------
 # Map HP_LOG_LEVEL (our user-friendly strings) to valid HAProxy log levels
@@ -340,15 +345,15 @@ EOF
   fi
 fi
 
-log "INFO: Starting Python HaProxy Agent on 127.0.0.1:8200 and 127.0.0.1:9600..."
+log "INFO: Starting Python HaProxy Agent on 127.0.0.1:8200 and ${HP_SPOA_ADDRESS}..."
 nohup python3 /usr/local/bin/haproxy_agent.py &
 
 # Wait deterministically for the agent to be ready (HTTP) and for SPOA (TCP)
 log "INFO: Waiting for HaRP Agent HTTP (GET http://127.0.0.1:8200/info) to be ready..."
 wait_for_http "http://127.0.0.1:8200/info" "$HP_WAIT_AGENT_HTTP" "$HP_WAIT_INTERVAL"
 
-log "INFO: Waiting for SPOA port 127.0.0.1:9600..."
-wait_for_tcp "127.0.0.1" "9600" "$HP_WAIT_SPOA" "$HP_WAIT_INTERVAL"
+log "INFO: Waiting for SPOA port ${HP_SPOA_ADDRESS}..."
+wait_for_tcp "$SPOA_HOST" "$SPOA_PORT" "$HP_WAIT_SPOA" "$HP_WAIT_INTERVAL"
 
 log "INFO: Starting FRP server on ${HP_FRP_ADDRESS}..."
 frps -c /frps.toml &
