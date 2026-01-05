@@ -218,8 +218,14 @@ For remote or external Docker Engines - or if you prefer not to mount the Docker
    - `client.key`
    - `ca.crt`
 
+   ```bash
+   mkdir -p harp_frpc_docker/certs/frp
+   cd harp_frpc_docker
+   for f in {client.crt,client.key,ca.crt}; do docker cp appapi-harp:/certs/frp/$f certs/frp/; done
+   ```
+
 2. **Create an FRP Client Configuration:**
-   With the certificate files in hand, create a configuration file (for example, `frpc.toml`) on the Docker Engine host. Below is a sample configuration:
+   With the certificate files in hand, create a configuration file (for example, `frpc.toml`) on the Docker Engine host in the "harp_frpc_docker" folder. Below is a sample configuration:
 
    ```toml
    # frpc.toml
@@ -257,12 +263,32 @@ For remote or external Docker Engines - or if you prefer not to mount the Docker
    ```bash
    docker run \
      -v /path/to/frpc.toml:/etc/frpc.toml \
+     -v `pwd`/certs:/certs \
      -v /var/run/docker.sock:/var/run/docker.sock \
      --restart unless-stopped \
+     -d --name harp_frpc_docker \
      -- ghcr.io/fatedier/frpc:v0.61.1 "-c=/etc/frpc.toml"
    ```
 
-You may want to run the FRP client-server connections through the same reverse proxy as the Nextcloud instance for better security. The following is an example of how to configure NGINX for this purpose:
+   Or with docker compose:
+
+   ```yaml
+   services:
+     harp_frpc_docker:
+       image: ghcr.io/fatedier/frpc:v0.61.1
+       container_name: harp_frpc_docker
+       volumes:
+         - ./frpc.toml:/etc/frpc.toml
+         - ./certs:/certs
+         - /var/run/docker.sock:/var/run/docker.sock
+       restart: unless-stopped
+       command: -c=/etc/frpc.toml
+   ```
+   ```bash
+   docker compose up -d
+   ```
+
+The FRP client-server connections, i.e. the connection from the above FRP client to the FRP server in the HaRP container, can be passed through the same reverse proxy as the Nextcloud instance for better security. The following is an example of how to configure NGINX for this purpose:
 
 ```nginx
   stream {
