@@ -92,6 +92,15 @@ if [ -z "$HP_SHARED_KEY" ]; then
     echo "ERROR: Either HP_SHARED_KEY or HP_SHARED_KEY_FILE must be set."
     exit 1
 fi
+
+# Validate HP_SHARED_KEY contains only ASCII characters (required by SPOE library)
+NON_ASCII_COUNT=$(printf '%s' "$HP_SHARED_KEY" | LC_ALL=C tr -d '\040-\176' | wc -c)
+if [ "$NON_ASCII_COUNT" -gt 0 ]; then
+    echo "ERROR: HP_SHARED_KEY contains non-ASCII characters."
+    echo "Please use only printable ASCII characters (a-z, A-Z, 0-9, and symbols like !@#\$%^&*...)."
+    exit 1
+fi
+
 export HP_SHARED_KEY
 
 # Check if the required environment variables are set

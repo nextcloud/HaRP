@@ -161,6 +161,7 @@ HaRP is configured via several environment variables. Here are the key variables
 - **`HP_SHARED_KEY`** (or **`HP_SHARED_KEY_FILE`**)
   - **Description:** A secret token used for authentication between services.
   - **Requirement:** Must be set at runtime. Use only one of these methods.
+  - **Important:** Must contain only ASCII characters (a-z, A-Z, 0-9, and common symbols).
 
 - **`NC_INSTANCE_URL`**
   - **Description:** The base URL of your Nextcloud instance.
