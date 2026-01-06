@@ -36,6 +36,17 @@ log() {
     fi
 }
 
+# ----------------------------------------------------------------------------
+# Helper function to strip surrounding quotes from a string.
+# This is useful because users sometimes accidentally include quotes in
+# docker-compose environment variables (e.g., HP_SHARED_KEY="secret").
+# In YAML, this includes the literal quotes in the value.
+# ----------------------------------------------------------------------------
+strip_quotes() {
+    # Remove leading and trailing double or single quotes
+    echo "$1" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+
 wait_for_tcp() {
     # $1 host, $2 port, $3 timeout(s), $4 interval(s)
     host="$1"; port="$2"; timeout="${3:-30}"; interval="${4:-0.5}"
@@ -101,7 +112,16 @@ if [ "$NON_ASCII_COUNT" -gt 0 ]; then
     exit 1
 fi
 
+# Strip surrounding quotes if user accidentally included them in env vars
+HP_SHARED_KEY="$(strip_quotes "$HP_SHARED_KEY")"
 export HP_SHARED_KEY
+
+# Strip surrounding quotes from other commonly affected environment variables
+NC_INSTANCE_URL="$(strip_quotes "$NC_INSTANCE_URL")"
+HP_FRP_ADDRESS="$(strip_quotes "$HP_FRP_ADDRESS")"
+HP_EXAPPS_ADDRESS="$(strip_quotes "${HP_EXAPPS_ADDRESS:-}")"
+HP_EXAPPS_HTTPS_ADDRESS="$(strip_quotes "${HP_EXAPPS_HTTPS_ADDRESS:-}")"
+export NC_INSTANCE_URL HP_FRP_ADDRESS HP_EXAPPS_ADDRESS HP_EXAPPS_HTTPS_ADDRESS
 
 # Check if the required environment variables are set
 if [ -z "$HP_FRP_ADDRESS" ]; then
@@ -300,6 +320,10 @@ ops = ["Login"]
 EOF
   fi
   log "INFO: FRP server configuration generated at /frps.toml."
+  if [ "$HP_VERBOSE_START" -eq 1 ]; then
+    log "INFO: Generated /frps.toml:"
+    cat /frps.toml
+  fi
 else
   log "INFO: /frps.toml already exists. Skipping FRP server configuration generation..."
 fi
@@ -350,6 +374,10 @@ name = "bundled-deploy-daemon"
 type = "unix_domain_socket"
 unixPath = "/var/run/docker.sock"
 EOF
+    fi
+    if [ "$HP_VERBOSE_START" -eq 1 ]; then
+      log "INFO: Generated /frpc-docker.toml:"
+      cat /frpc-docker.toml
     fi
   else
     log "INFO: /frpc-docker.toml already exists. Skipping generation..."
