@@ -92,6 +92,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 1800s;
     }
 }
 ```
@@ -100,7 +101,11 @@ server {
 
 ```caddyfile
 nextcloud.com {
-    reverse_proxy /exapps/* 127.0.0.1:8780
+    reverse_proxy /exapps/* 127.0.0.1:8780 {
+        transport http {
+            read_timeout 1800s
+        }
+    }
 }
 ```
 
@@ -119,9 +124,16 @@ http:
       loadBalancer:
         servers:
           - url: "http://127.0.0.1:8780"
+        serversTransport: exapps-transport
+  serversTransports:
+    exapps-transport:
+      forwardingTimeouts:
+        responseHeaderTimeout: 1800s
 ```
 
 > **Note:** Replace `127.0.0.1` with the actual IP address of your HaRP container if it is running on a different host.
+
+> **Note:** The `1800s` (30 minutes) read timeout matches HaRP's default `HP_TIMEOUT_SERVER` value. This is required for slow-responding ExApps (e.g., `context_chat_backend`) that may take a long time to process requests like document indexing or AI responses.
 
 ### Cloudflare Tunneling Example
 ![cloudflare-tunnel-1](assets/cloudflare-tunnel-1.png)
