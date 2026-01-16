@@ -73,6 +73,36 @@ docker run \
 
 > **Warning:** Do not forget to change the **HP_SHARED_KEY** value to a secure one!
 
+#### Advanced Docker Deployment with Nextcloud and Docker Host behind Apache Reverse Proxy
+
+##### On the Docker Host
+##### Creation of Cert folder (if necessary)
+`mkdir -p /some/path/{certs,}`
+##### Open ports (based on Almalinux - RHEL Distros)
+```
+firewall-cmd --permanent --zone=public --add-port=8780/tcp
+firewall-cmd --permanent --zone=public --add-port=8782/tcp
+firewall-cmd --reload
+```
+##### Deploy of the HaRP Container
+```
+docker run \
+  -e HP_SHARED_KEY="some_very_secure_password" \
+  -e NC_INSTANCE_URL="https://cloud.acme.com" \
+  -e HP_TRUSTED_PROXY_IPS="192.168.0.0/24" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /some/path/certs:/certs \
+  -p 8780:8780 \
+  -p 8782:8782 \
+  --name appapi-harp -h appapi-harp \
+  --restart unless-stopped \
+  -d ghcr.io/nextcloud/nextcloud-appapi-harp:release
+```
+
+> **Warning:** Do not forget to change the **HP_SHARED_KEY** value to a secure one!
+
+> **Note:** You have to configure the **NC_INSTANCE_URL** value with your public Nextcloud url and the **HP_TRUSTED_PROXY_IPS** value with your local network (CDIR) that hosts your reverse proxy and your Nextcloud instance.
+
 ---
 
 ## Configuring Your Reverse Proxy
@@ -135,6 +165,17 @@ http:
 
 > **Note:** The `1800s` (30 minutes) read timeout matches HaRP's default `HP_TIMEOUT_SERVER` value. This is required for slow-responding ExApps (e.g., `context_chat_backend`) that may take a long time to process requests like document indexing or AI responses.
 
+### Apache Example
+#### On the Apache Reverse Proxy Host - Reverse proxy redirections
+On the virtual Host "cloud.acme.com" of the apache conf file
+Add the following lines (before the existing configuration)
+```apache
+#  AppAPI Configuration
+ProxyPass /exapps/ http://<IP_host2_docker>:8780/exapps/
+ProxyPassReverse /exapps/ http://<IP_host2_docker>:8780/exapps/
+```
+
+
 ### Cloudflare Tunneling Example
 ![cloudflare-tunnel-1](assets/cloudflare-tunnel-1.png)
 
@@ -143,6 +184,45 @@ http:
 > **Note:** The order of the routes matters, move the `exapp/*` route above your Nextcloud's main route.
 
 ---
+
+## Nextcloud Configuration 
+
+Based on a infrastructure With 3 hosts :
+- Reverse Proxy
+- Nextcloud
+- Docker
+
+### On the Nextcloud Web Interface - Daemon Register
+Add the following configuration :
+```
+Daemon Configuraiton template : HaRP Proxy (HOST)
+Surname : appapi-harp
+Display name : appapi-harp
+Deployment method : docker-install
+HaRP host : <IP_host2_docker>:8780
+HaRP shared key : some_very_secure_password
+Nextcloud URL : https://cloud.acme.com
+FRP server address : <IP_host2_docker>:8782
+Docker network : bridge
+```
+
+Finally, test the whole setup with “Test deploy” in the 3-dots menu of the deploy daemon.
+
+### Additional tests from the network of your hosts (based on Almalinux - RHEL Distros))
+```
+curl -fsS \
+  -H "harp-shared-key: some_very_secure_password" \
+  -H "docker-engine-port: 24000" \
+  http://<IP_host2_docker>:8780/exapps/app_api/v1.41/_ping
+```
+
+```
+curl -fsS \
+  -H "harp-shared-key: some_very_secure_password" \
+  -H "docker-engine-port: 24000" \
+  https://cloud.acme.com/exapps/app_api/v1.41/_ping
+```
+
 
 ## Environment Variables
 
