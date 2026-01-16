@@ -331,23 +331,40 @@ The FRP client-server connections, i.e. the connection from the above FRP client
 3. Ensure the `curl` command-line utility is installed in your ExApp's Docker image, as it's needed by the following script to download the FRP client.
 4. Add the following lines to your `Dockerfile` to automatically include the `FRP client` binaries in your Docker image:
 
-    ```bash
-    # Download and install FRP client
+    ```dockerfile
+    # Download and install FRP client with checksum verification
+    # FRP version and checksums - update these when upgrading
+    ARG FRP_VERSION=0.61.1
+    ARG FRP_AMD64_SHA256=bff260b68ca7b1461182a46c4f34e9709ba32764eed30a15dd94ac97f50a2c40
+    ARG FRP_ARM64_SHA256=af6366f2b43920ebfe6235dba6060770399ed1fb18601e5818552bd46a7621f8
+
     RUN set -ex; \
         ARCH=$(uname -m); \
         if [ "$ARCH" = "aarch64" ]; then \
-          FRP_URL="https://raw.githubusercontent.com/nextcloud/HaRP/main/exapps_dev/frp_0.61.1_linux_arm64.tar.gz"; \
+            FRP_ARCH="arm64"; \
+            FRP_SHA256="${FRP_ARM64_SHA256}"; \
         else \
-          FRP_URL="https://raw.githubusercontent.com/nextcloud/HaRP/main/exapps_dev/frp_0.61.1_linux_amd64.tar.gz"; \
+            FRP_ARCH="amd64"; \
+            FRP_SHA256="${FRP_AMD64_SHA256}"; \
         fi; \
-        echo "Downloading FRP client from $FRP_URL"; \
-        curl -L "$FRP_URL" -o /tmp/frp.tar.gz; \
+        FRP_URL="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${FRP_ARCH}.tar.gz"; \
+        echo "Downloading FRP v${FRP_VERSION} for ${FRP_ARCH}..."; \
+        curl -fsSL "${FRP_URL}" -o /tmp/frp.tar.gz; \
+        ACTUAL_SHA256=$(sha256sum /tmp/frp.tar.gz | cut -d' ' -f1); \
+        if [ "$ACTUAL_SHA256" != "$FRP_SHA256" ]; then \
+            echo "Checksum verification failed for FRP v${FRP_VERSION} (${FRP_ARCH})"; \
+            echo "Expected: ${FRP_SHA256}"; \
+            echo "Got:      ${ACTUAL_SHA256}"; \
+            exit 1; \
+        fi; \
         tar -C /tmp -xzf /tmp/frp.tar.gz; \
-        mv /tmp/frp_0.61.1_linux_* /tmp/frp; \
-        cp /tmp/frp/frpc /usr/local/bin/frpc; \
+        cp /tmp/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frpc /usr/local/bin/frpc; \
         chmod +x /usr/local/bin/frpc; \
-        rm -rf /tmp/frp /tmp/frp.tar.gz
+        rm -rf /tmp/frp_${FRP_VERSION}_linux_${FRP_ARCH} /tmp/frp.tar.gz; \
+        echo "FRP client installed successfully"
     ```
+
+    > **Note:** The checksums are verified against the official FRP releases to prevent supply chain attacks. When upgrading FRP, update both the version and checksums from the [FRP releases page](https://github.com/fatedier/frp/releases).
 
     > **Note:** For `Alpine 3.21` Linux you can just install `FRP` from repo using `apk add frp` command.
 
