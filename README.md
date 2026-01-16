@@ -350,7 +350,13 @@ The FRP client-server connections, i.e. the connection from the above FRP client
         FRP_URL="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${FRP_ARCH}.tar.gz"; \
         echo "Downloading FRP v${FRP_VERSION} for ${FRP_ARCH}..."; \
         curl -fsSL "${FRP_URL}" -o /tmp/frp.tar.gz; \
-        echo "${FRP_SHA256}  /tmp/frp.tar.gz" | sha256sum -c -; \
+        ACTUAL_SHA256=$(sha256sum /tmp/frp.tar.gz | cut -d' ' -f1); \
+        if [ "$ACTUAL_SHA256" != "$FRP_SHA256" ]; then \
+            echo "Checksum verification failed for FRP v${FRP_VERSION} (${FRP_ARCH})"; \
+            echo "Expected: ${FRP_SHA256}"; \
+            echo "Got:      ${ACTUAL_SHA256}"; \
+            exit 1; \
+        fi; \
         tar -C /tmp -xzf /tmp/frp.tar.gz; \
         cp /tmp/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frpc /usr/local/bin/frpc; \
         chmod +x /usr/local/bin/frpc; \
