@@ -513,6 +513,19 @@ These checks run **inside the HaRP container** (e.g., `docker exec -it appapi-ha
    # Expected: OK
    ```
 
+**3) Test full HAProxy routing (same path as AppAPI)**
+
+   This tests the complete request flow through HAProxy, SPOE agent, and to the Docker engine — the same path that AppAPI uses when performing "Test deploy":
+
+   ```
+   curl -v http://127.0.0.1:8780/exapps/app_api/_ping \
+     -H "harp-shared-key: $HP_SHARED_KEY" \
+     -H "docker-engine-port: 24000"
+   # Expected: OK
+   ```
+
+   > **Note:** Do NOT test against port 8200 directly (e.g., `curl http://127.0.0.1:8200/_ping`). Port 8200 is the internal control API and does not handle Docker API requests.
+
 ### Verify that the Reverse Proxy configuration is correct
 
 Stop the HaRP container temporarily and start a dummy server with `nc` (netcat) to confirm that your reverse proxy is forwarding requests correctly with all the headers:
