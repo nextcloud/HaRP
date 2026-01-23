@@ -7,7 +7,7 @@ set -e
 # ----------------------------------------------------------------------------
 # start.sh
 #  - Generates self-signed certificates for FRP Server and FRP Clients
-#  - Generates /haproxy.cfg from haproxy.cfg.template
+#  - Generates haproxy.cfg from haproxy.cfg.template (in /run/harp if available)
 #  - Reads HP_SHARED_KEY or HP_SHARED_KEY_FILE
 #  - Comments out HTTPS frontends if no /certs/cert.pem is found
 #  - Starts FRP server (frps) on HP_FRP_ADDRESS
@@ -35,6 +35,17 @@ log() {
         echo "$@"
     fi
 }
+
+# ----------------------------------------------------------------------------
+# Determine config directory - use /run/harp if available (for read-only rootfs)
+# If user mounted config files at root, use root paths for backward compatibility
+# ----------------------------------------------------------------------------
+CFG_DIR=""
+if [ -f "/haproxy.cfg" ] || [ -f "/frps.toml" ] || [ -f "/frpc-docker.toml" ]; then
+    log "INFO: Found user-provided config file(s) at root, using root paths."
+elif [ -d "/run/harp" ] || mkdir -p /run/harp 2>/dev/null; then
+    CFG_DIR="/run/harp"
+fi
 
 # ----------------------------------------------------------------------------
 # Helper function to strip surrounding quotes from a string.
@@ -239,38 +250,38 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# Generate final /haproxy.cfg if not already present
+# Generate final haproxy.cfg if not already present
 # ----------------------------------------------------------------------------
-if [ -f "/haproxy.cfg" ]; then
-  log "INFO: /haproxy.cfg already present. Skipping config generation..."
+if [ -f "${CFG_DIR}/haproxy.cfg" ]; then
+  log "INFO: ${CFG_DIR}/haproxy.cfg already present. Skipping config generation..."
 else
-  log "INFO: Creating /haproxy.cfg from haproxy.cfg.template..."
+  log "INFO: Creating ${CFG_DIR}/haproxy.cfg from haproxy.cfg.template..."
 
   # Use envsubst to render the main configuration.
-  envsubst < /haproxy.cfg.template > /haproxy.cfg
+  envsubst < /haproxy.cfg.template > "${CFG_DIR}/haproxy.cfg"
 
   # If we do not have a SSL cert for HAProxy, comment out the HTTPS frontends
   if [ -f "/certs/cert.pem" ]; then
     log "INFO: Found /certs/cert.pem, HTTPS frontends remain enabled."
-    sed -i "/_HTTPS_FRONTEND_/ s|_HTTPS_FRONTEND_ ||g" /haproxy.cfg
+    sed -i "/_HTTPS_FRONTEND_/ s|_HTTPS_FRONTEND_ ||g" "${CFG_DIR}/haproxy.cfg"
     chmod 644 /certs/cert.pem
   else
     log "INFO: No /certs/cert.pem found, disabling HTTPS frontends..."
-    sed -i "/_HTTPS_FRONTEND_/ s|^|#|g" /haproxy.cfg
+    sed -i "/_HTTPS_FRONTEND_/ s|^|#|g" "${CFG_DIR}/haproxy.cfg"
   fi
 fi
 
 if [ "$HP_VERBOSE_START" -eq 1 ]; then
-    log "INFO: Final /haproxy.cfg:"
-    cat /haproxy.cfg
+    log "INFO: Final ${CFG_DIR}/haproxy.cfg:"
+    cat "${CFG_DIR}/haproxy.cfg"
 fi
 
 # ----------------------------------------------------------------------------
 # Prepare FRP configuration
 # ----------------------------------------------------------------------------
-if [ ! -f "/frps.toml" ]; then
+if [ ! -f "${CFG_DIR}/frps.toml" ]; then
   if [ "${HP_FRP_DISABLE_TLS}" != "true" ]; then
-cat <<EOF >/frps.toml
+cat <<EOF >"${CFG_DIR}/frps.toml"
 bindAddr = "${FRP_HOST}"
 bindPort = ${FRP_PORT}
 proxyBindAddr = "127.0.0.1"
@@ -280,7 +291,7 @@ transport.tls.certFile = "/certs/frp/server.crt"
 transport.tls.keyFile = "/certs/frp/server.key"
 transport.tls.trustedCaFile = "/certs/frp/ca.crt"
 
-log.to = "/frps.log"
+log.to = "${CFG_DIR}/frps.log"
 log.level = "info"
 log.maxDays = 3
 
@@ -296,14 +307,14 @@ path = "/frp_handler"
 ops = ["Login"]
 EOF
   else
-cat <<EOF >/frps.toml
+cat <<EOF >"${CFG_DIR}/frps.toml"
 bindAddr = "${FRP_HOST}"
 bindPort = ${FRP_PORT}
 proxyBindAddr = "127.0.0.1"
 
 transport.tls.force = false
 
-log.to = "/frps.log"
+log.to = "${CFG_DIR}/frps.log"
 log.level = "info"
 log.maxDays = 3
 
@@ -319,13 +330,13 @@ path = "/frp_handler"
 ops = ["Login"]
 EOF
   fi
-  log "INFO: FRP server configuration generated at /frps.toml."
+  log "INFO: FRP server configuration generated at ${CFG_DIR}/frps.toml."
   if [ "$HP_VERBOSE_START" -eq 1 ]; then
-    log "INFO: Generated /frps.toml:"
-    cat /frps.toml
+    log "INFO: Generated ${CFG_DIR}/frps.toml:"
+    cat "${CFG_DIR}/frps.toml"
   fi
 else
-  log "INFO: /frps.toml already exists. Skipping FRP server configuration generation..."
+  log "INFO: ${CFG_DIR}/frps.toml already exists. Skipping FRP server configuration generation..."
 fi
 
 # ----------------------------------------------------------------------------
@@ -334,10 +345,10 @@ fi
 if [ -e "/var/run/docker.sock" ]; then
   LOCAL_FRP_HOST="$FRP_HOST"
   [ "$LOCAL_FRP_HOST" = "0.0.0.0" ] && LOCAL_FRP_HOST="127.0.0.1"
-  if [ ! -f "/frpc-docker.toml" ]; then
-    log "INFO: Detected /var/run/docker.sock, generating /frpc-docker.toml configuration file..."
+  if [ ! -f "${CFG_DIR}/frpc-docker.toml" ]; then
+    log "INFO: Detected /var/run/docker.sock, generating ${CFG_DIR}/frpc-docker.toml configuration file..."
     if [ "${HP_FRP_DISABLE_TLS}" != "true" ]; then
-cat <<EOF >/frpc-docker.toml
+cat <<EOF >"${CFG_DIR}/frpc-docker.toml"
 serverAddr = "${LOCAL_FRP_HOST}"
 serverPort = ${FRP_PORT}
 
@@ -358,7 +369,7 @@ type = "unix_domain_socket"
 unixPath = "/var/run/docker.sock"
 EOF
     else
-cat <<EOF >/frpc-docker.toml
+cat <<EOF >"${CFG_DIR}/frpc-docker.toml"
 serverAddr = "${LOCAL_FRP_HOST}"
 serverPort = ${FRP_PORT}
 
@@ -376,11 +387,11 @@ unixPath = "/var/run/docker.sock"
 EOF
     fi
     if [ "$HP_VERBOSE_START" -eq 1 ]; then
-      log "INFO: Generated /frpc-docker.toml:"
-      cat /frpc-docker.toml
+      log "INFO: Generated ${CFG_DIR}/frpc-docker.toml:"
+      cat "${CFG_DIR}/frpc-docker.toml"
     fi
   else
-    log "INFO: /frpc-docker.toml already exists. Skipping generation..."
+    log "INFO: ${CFG_DIR}/frpc-docker.toml already exists. Skipping generation..."
   fi
 fi
 
@@ -395,7 +406,7 @@ log "INFO: Waiting for SPOA port ${HP_SPOA_ADDRESS}..."
 wait_for_tcp "$SPOA_HOST" "$SPOA_PORT" "$HP_WAIT_SPOA" "$HP_WAIT_INTERVAL"
 
 log "INFO: Starting FRP server on ${HP_FRP_ADDRESS}..."
-frps -c /frps.toml &
+frps -c "${CFG_DIR}/frps.toml" &
 
 # Wait for FRP port to be listening before starting frpc
 LOCAL_FRP_HOST="$FRP_HOST"
@@ -405,8 +416,8 @@ wait_for_tcp "$LOCAL_FRP_HOST" "$FRP_PORT" "$HP_WAIT_FRP" "$HP_WAIT_INTERVAL"
 
 if [ -e "/var/run/docker.sock" ]; then
   log "INFO: Starting FRP client for Docker Engine..."
-  frpc -c /frpc-docker.toml &
+  frpc -c "${CFG_DIR}/frpc-docker.toml" &
 fi
 
 log "INFO: Starting HAProxy..."
-exec haproxy -f /haproxy.cfg -W -db
+exec haproxy -f "${CFG_DIR}/haproxy.cfg" -W -db

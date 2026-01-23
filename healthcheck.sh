@@ -12,8 +12,15 @@
 #
 # This script returns 0 if all checks pass, 1 otherwise.
 
+# Determine config directory (same logic as start.sh)
+if [ -f "/run/harp/haproxy.cfg" ]; then
+  CFG_DIR="/run/harp"
+else
+  CFG_DIR=""
+fi
+
 # 1) Validate HAProxy config
-haproxy -c -f /haproxy.cfg || exit 1
+haproxy -c -f "${CFG_DIR}/haproxy.cfg" || exit 1
 
 if ! command -v nc >/dev/null 2>&1; then
   echo "ERROR: 'nc' command not found. Install netcat."
