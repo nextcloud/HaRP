@@ -77,7 +77,7 @@ docker run \
 
 ##### On the Docker Host
 ##### Creation of Cert folder (if necessary)
-`mkdir -p /some/path/{certs,}`
+`mkdir -p /some/path/certs`
 ##### Open ports (based on Almalinux - RHEL Distros)
 ```
 firewall-cmd --permanent --zone=public --add-port=8780/tcp
@@ -98,8 +98,6 @@ docker run \
   --restart unless-stopped \
   -d ghcr.io/nextcloud/nextcloud-appapi-harp:release
 ```
-
-> **Warning:** Do not forget to change the **HP_SHARED_KEY** value to a secure one!
 
 > **Note:** You have to configure the **NC_INSTANCE_URL** value with your public Nextcloud url and the **HP_TRUSTED_PROXY_IPS** value with your local network (CDIR) that hosts your reverse proxy and your Nextcloud instance.
 
@@ -173,6 +171,7 @@ Add the following lines (before the existing configuration)
 #  AppAPI Configuration
 ProxyPass /exapps/ http://<IP_host2_docker>:8780/exapps/
 ProxyPassReverse /exapps/ http://<IP_host2_docker>:8780/exapps/
+ProxyTimeout 1800
 ```
 
 
@@ -195,7 +194,7 @@ Based on a infrastructure With 3 hosts :
 ### On the Nextcloud Web Interface - Daemon Register
 Add the following configuration :
 ```
-Daemon Configuraiton template : HaRP Proxy (HOST)
+Daemon Configuration template : HaRP Proxy (HOST)
 Surname : appapi-harp
 Display name : appapi-harp
 Deployment method : docker-install
@@ -208,7 +207,7 @@ Docker network : bridge
 
 Finally, test the whole setup with “Test deploy” in the 3-dots menu of the deploy daemon.
 
-### Additional tests from the network of your hosts (based on Almalinux - RHEL Distros))
+### Additional tests from the network of your hosts (based on Almalinux - RHEL Distros)
 ```
 curl -fsS \
   -H "harp-shared-key: some_very_secure_password" \
