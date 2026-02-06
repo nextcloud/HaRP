@@ -460,13 +460,36 @@ async def exapps_msg(
         if request_headers["harp-shared-key"] != SHARED_KEY:
             await record_ip_failure(client_ip)
             return reply.set_txn_var("bad_request", 1)
-        exapp_record = ExApp(
-            exapp_token="",
-            exapp_version=request_headers["ex-app-version"],
-            host=request_headers["ex-app-host"],
-            port=int(request_headers["ex-app-port"]),
-        )
         authorization_app_api = request_headers["authorization-app-api"]
+        # Prefer cached upstream (K8s expose sets correct host/port in cache)
+        async with EXAPP_CACHE_LOCK:
+            cached = EXAPP_CACHE.get(exapp_id_lower)
+        if cached:
+            exapp_record = cached
+        else:
+            exapp_record = ExApp(
+                exapp_token="",
+                exapp_version=request_headers["ex-app-version"],
+                host=request_headers["ex-app-host"],
+                port=int(request_headers["ex-app-port"]),
+            )
+            # For K8s ExApps: resolve upstream from live Service
+            k8s_upstream = await _k8s_resolve_exapp_upstream(exapp_id_lower)
+            if k8s_upstream:
+                # Fetch full record (with token & routes) so cache is complete
+                try:
+                    full_record = await nc_get_exapp(exapp_id_lower)
+                except Exception:
+                    full_record = None
+                if full_record:
+                    exapp_record = full_record
+                exapp_record.host, exapp_record.port = k8s_upstream
+                exapp_record.resolved_host = ""
+                LOGGER.info("Resolved K8s upstream for '%s': %s:%d", exapp_id, *k8s_upstream)
+                # Only cache if we have the full record (token + routes)
+                if full_record:
+                    async with EXAPP_CACHE_LOCK:
+                        EXAPP_CACHE[exapp_id_lower] = exapp_record
 
     if not exapp_record:
         async with EXAPP_CACHE_LOCK:
@@ -478,6 +501,12 @@ async def exapps_msg(
                         LOGGER.error("No such ExApp enabled: %s", exapp_id)
                         await record_ip_failure(client_ip_str)
                         return reply.set_txn_var("not_found", 1)
+                    # For K8s ExApps: resolve upstream from live Service
+                    k8s_upstream = await _k8s_resolve_exapp_upstream(exapp_id_lower)
+                    if k8s_upstream:
+                        exapp_record.host, exapp_record.port = k8s_upstream
+                        exapp_record.resolved_host = ""
+                        LOGGER.info("Resolved K8s upstream for '%s': %s:%d", exapp_id, *k8s_upstream)
                     LOGGER.info("Received new ExApp record: %s", exapp_record)
                     EXAPP_CACHE[exapp_id_lower] = exapp_record
                 except ValidationError as e:
@@ -2070,6 +2099,50 @@ def _k8s_build_service_manifest(
         "metadata": metadata,
         "spec": spec,
     }
+
+
+async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
+    """Look up the K8s Service for an ExApp and return the correct (host, port).
+
+    Called on cache miss so that after a HaRP restart the correct upstream
+    address is recovered from the live Service rather than relying on
+    Nextcloud metadata (which stores the container-internal host/port).
+    Returns None if K8s is disabled or no matching Service exists.
+    """
+    if not K8S_ENABLED or not K8S_API_SERVER or not _get_k8s_token():
+        return None
+
+    try:
+        exapp = ExAppName(name=app_name)
+    except Exception:
+        return None
+
+    service_name = exapp.exapp_k8s_name
+    status, svc, _ = await _k8s_request(
+        "GET",
+        f"/api/v1/namespaces/{K8S_NAMESPACE}/services/{service_name}",
+    )
+    if status != 200 or not isinstance(svc, dict):
+        return None
+
+    svc_type = (svc.get("spec") or {}).get("type", "ClusterIP")
+    try:
+        if svc_type == "NodePort":
+            port = _k8s_extract_nodeport(svc)
+            host = await _k8s_pick_node_address(preferred_type="InternalIP")
+            return (host, port)
+        elif svc_type == "ClusterIP":
+            port = _k8s_extract_service_port(svc)
+            host = _k8s_service_dns_name(service_name, K8S_NAMESPACE)
+            return (host, port)
+        elif svc_type == "LoadBalancer":
+            port = _k8s_extract_service_port(svc)
+            host = _k8s_extract_loadbalancer_host(svc)
+            if host:
+                return (host, port)
+    except Exception as e:
+        LOGGER.warning("Failed to resolve K8s upstream for '%s': %s", app_name, e)
+    return None
 
 
 def _k8s_service_dns_name(service_name: str, namespace: str) -> str:
