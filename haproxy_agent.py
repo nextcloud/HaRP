@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import socket
+import ssl
 import tarfile
 import time
 from base64 import b64encode
@@ -31,8 +32,25 @@ NC_INSTANCE_URL = os.environ.get("NC_INSTANCE_URL")
 SPOA_ADDRESS = os.environ.get("HP_SPOA_ADDRESS", "127.0.0.1:9600")
 SPOA_HOST, SPOA_PORT = SPOA_ADDRESS.rsplit(":", 1)
 SPOA_PORT = int(SPOA_PORT)
+# Kubernetes environment variables
+K8S_ENABLED = os.environ.get("HP_K8S_ENABLED", "false").lower() in {"1", "true", "yes"}
+K8S_NAMESPACE = os.environ.get("HP_K8S_NAMESPACE", "nextcloud-exapps")
+K8S_API_SERVER = os.environ.get("HP_K8S_API_SERVER")  # e.g. https://kubernetes.default.svc
+K8S_CA_FILE = os.environ.get("HP_K8S_CA_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+K8S_TOKEN = os.environ.get("HP_K8S_BEARER_TOKEN")
+K8S_TOKEN_FILE = os.environ.get("HP_K8S_BEARER_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token")
+K8S_VERIFY_SSL = os.environ.get("HP_K8S_VERIFY_SSL", "true").lower() != "false"
+K8S_STORAGE_CLASS = os.environ.get("HP_K8S_STORAGE_CLASS", "")
+K8S_DEFAULT_STORAGE_SIZE = os.environ.get("HP_K8S_DEFAULT_STORAGE_SIZE", "10Gi")
+if not K8S_API_SERVER and os.environ.get("KUBERNETES_SERVICE_HOST"):
+    host = os.environ["KUBERNETES_SERVICE_HOST"]
+    port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+    K8S_API_SERVER = f"https://{host}:{port}"
+
+K8S_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60.0)
+K8S_NAME_MAX_LENGTH = 63
 # Set up the logging configuration
-LOG_LEVEL = os.environ["HP_LOG_LEVEL"].upper()
+LOG_LEVEL = os.environ.get("HP_LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL)
 LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(level=LOG_LEVEL)
@@ -59,7 +77,8 @@ if TRUSTED_PROXIES_STR:
         LOGGER.error(
             "Invalid value for HP_TRUSTED_PROXY_IPS: %s. Client IP detection from headers is disabled. "
             "The X-Forwarded-For and X-Real-IP headers will not be respected. "
-            "This can lead to the outer proxy's IP being blocked during a bruteforce attempt instead of the actual client's IP.",
+            "This can lead to the outer proxy's IP being blocked "
+            "during a bruteforce attempt instead of the actual client's IP.",
             e,
         )
         TRUSTED_PROXIES = []
@@ -105,6 +124,18 @@ class NcUser(BaseModel):
     access_level: AccessLevel = Field(..., description="ADMIN(2), USER(1), or PUBLIC(0)")
 
 
+def _sanitize_k8s_name(raw: str) -> str:
+    """Convert an arbitrary string into a DNS-1123 compatible name for Kubernetes."""
+    name = raw.lower().replace("_", "-")
+    name = re.sub(r"[^a-z0-9-]", "-", name)
+    name = re.sub(r"-+", "-", name).strip("-")
+    if not name:
+        name = "exapp"
+    if len(name) > K8S_NAME_MAX_LENGTH:
+        name = name[:K8S_NAME_MAX_LENGTH].rstrip("-")
+    return name
+
+
 class ExAppName(BaseModel):
     name: str = Field(..., description="ExApp name.")
     instance_id: str = Field("", description="Nextcloud instance ID.")
@@ -118,6 +149,21 @@ class ExAppName(BaseModel):
     @property
     def exapp_container_volume(self) -> str:
         return f"{self.exapp_container_name}_data"
+
+    @computed_field
+    @property
+    def exapp_k8s_name(self) -> str:
+        """Name used for Deployment / Pods."""
+        return _sanitize_k8s_name(self.exapp_container_name)
+
+    @computed_field
+    @property
+    def exapp_k8s_volume_name(self) -> str:
+        """PVC name for ExApp's data volume."""
+        base = _sanitize_k8s_name(self.exapp_container_volume)
+        if len(base) > K8S_NAME_MAX_LENGTH:
+            base = base[:K8S_NAME_MAX_LENGTH].rstrip("-")
+        return base
 
 
 class CreateExAppMounts(BaseModel):
@@ -137,6 +183,24 @@ class CreateExAppPayload(ExAppName):
     mount_points: list[CreateExAppMounts] = Field([], description="List of mount points for the container.")
     resource_limits: dict[str, Any] = Field({}, description="Resource limits for the container.")
 
+    @model_validator(mode="before")
+    @classmethod
+    def accept_k8s_friendly_payload(cls, data: Any) -> Any:
+        """Allow K8s-style payloads like:
+
+          {
+            "image": "ghcr.io/nextcloud/test-deploy:release",
+            "resource_limits": {"cpu": "500m", "memory": "512Mi"}
+          }
+        by mapping 'image' -> 'image_id' and defaulting network_mode.
+        """
+        if isinstance(data, dict):
+            if "image_id" not in data and "image" in data:
+                data = {**data, "image_id": data["image"]}  # Allow 'image' instead of 'image_id'
+            if "network_mode" not in data:
+                data = {**data, "network_mode": "bridge"}  # Default network_mode (used only for Docker)
+        return data
+
 
 class RemoveExAppPayload(ExAppName):
     remove_data: bool = Field(False, description="Flag indicating whether the Docker ExApp volume should be deleted.")
@@ -145,6 +209,90 @@ class RemoveExAppPayload(ExAppName):
 class InstallCertificatesPayload(ExAppName):
     system_certs_bundle: str | None = Field(None, description="Content of the system CA bundle (concatenated PEMs).")
     install_frp_certs: bool = Field(True, description="Flag to control installation of FRP certificates.")
+
+
+class ExposeExAppPayload(ExAppName):
+    port: int = Field(..., ge=1, le=65535, description="Port on which the ExApp listens inside the Pod/container.")
+    expose_type: Literal["nodeport", "clusterip", "loadbalancer", "manual"] = Field(
+        "nodeport",
+        description="How HaRP should make the ExApp reachable (and which endpoint it registers).",
+    )
+    upstream_host: str | None = Field(
+        None,
+        description=(
+            "Override the host that HaRP should use to reach the ExApp. "
+            "For expose_type=manual this is required. "
+            "For nodeport it is strongly recommended (stable VIP/LB/edge-node)."
+        ),
+    )
+    upstream_port: int | None = Field(
+        None,
+        ge=1,
+        le=65535,
+        description=(
+            "Override the port that HaRP should use to reach the ExApp. "
+            "Only used for expose_type=manual (otherwise computed from Service)."
+        ),
+    )
+    service_port: int | None = Field(
+        None,
+        ge=1,
+        le=65535,
+        description="Service 'port' value (defaults to payload.port). targetPort always equals payload.port.",
+    )
+    node_port: int | None = Field(
+        None,
+        ge=30000,
+        le=32767,
+        description="Requested nodePort when expose_type=nodeport (optional).",
+    )
+    external_traffic_policy: Literal["Cluster", "Local"] | None = Field(
+        None,
+        description="Service spec.externalTrafficPolicy (NodePort/LoadBalancer only).",
+    )
+    load_balancer_ip: str | None = Field(
+        None,
+        description="Optional spec.loadBalancerIP when expose_type=loadbalancer (provider-specific).",
+    )
+    service_annotations: dict[str, str] = Field(
+        default_factory=dict,
+        description="Annotations applied to the generated Service.",
+    )
+    service_labels: dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra labels applied to the generated Service.",
+    )
+    wait_timeout_seconds: float = Field(
+        60.0,
+        ge=0,
+        le=600,
+        description="How long to wait for a LoadBalancer ingress hostname/IP.",
+    )
+    wait_interval_seconds: float = Field(
+        1.0,
+        ge=0.1,
+        le=10.0,
+        description="Polling interval when waiting for a LoadBalancer address.",
+    )
+    # Node auto-selection (only used if expose_type=nodeport AND upstream_host is not provided)
+    node_address_type: Literal["InternalIP", "ExternalIP"] = Field(
+        "InternalIP",
+        description="Which node address type to prefer when auto-picking a node address for NodePort.",
+    )
+    node_name: str | None = Field(
+        None,
+        description="If set, pick this exact node by metadata.name when auto-picking node address.",
+    )
+    node_label_selector: str | None = Field(
+        None,
+        description="If set, list nodes with this labelSelector when auto-picking node address.",
+    )
+
+    @model_validator(mode="after")
+    def validate_expose_payload(self) -> Self:
+        if self.expose_type == "manual" and not self.upstream_host:
+            raise ValueError("upstream_host is required when expose_type='manual'")
+        return self
 
 
 ###############################################################################
@@ -312,13 +460,36 @@ async def exapps_msg(
         if request_headers["harp-shared-key"] != SHARED_KEY:
             await record_ip_failure(client_ip)
             return reply.set_txn_var("bad_request", 1)
-        exapp_record = ExApp(
-            exapp_token="",
-            exapp_version=request_headers["ex-app-version"],
-            host=request_headers["ex-app-host"],
-            port=int(request_headers["ex-app-port"]),
-        )
         authorization_app_api = request_headers["authorization-app-api"]
+        # Prefer cached upstream (K8s expose sets correct host/port in cache)
+        async with EXAPP_CACHE_LOCK:
+            cached = EXAPP_CACHE.get(exapp_id_lower)
+        if cached:
+            exapp_record = cached
+        else:
+            exapp_record = ExApp(
+                exapp_token="",
+                exapp_version=request_headers["ex-app-version"],
+                host=request_headers["ex-app-host"],
+                port=int(request_headers["ex-app-port"]),
+            )
+            # For K8s ExApps: resolve upstream from live Service
+            k8s_upstream = await _k8s_resolve_exapp_upstream(exapp_id_lower)
+            if k8s_upstream:
+                # Fetch full record (with token & routes) so cache is complete
+                try:
+                    full_record = await nc_get_exapp(exapp_id_lower)
+                except Exception:
+                    full_record = None
+                if full_record:
+                    exapp_record = full_record
+                exapp_record.host, exapp_record.port = k8s_upstream
+                exapp_record.resolved_host = ""
+                LOGGER.info("Resolved K8s upstream for '%s': %s:%d", exapp_id, *k8s_upstream)
+                # Only cache if we have the full record (token + routes)
+                if full_record:
+                    async with EXAPP_CACHE_LOCK:
+                        EXAPP_CACHE[exapp_id_lower] = exapp_record
 
     if not exapp_record:
         async with EXAPP_CACHE_LOCK:
@@ -330,6 +501,12 @@ async def exapps_msg(
                         LOGGER.error("No such ExApp enabled: %s", exapp_id)
                         await record_ip_failure(client_ip_str)
                         return reply.set_txn_var("not_found", 1)
+                    # For K8s ExApps: resolve upstream from live Service
+                    k8s_upstream = await _k8s_resolve_exapp_upstream(exapp_id_lower)
+                    if k8s_upstream:
+                        exapp_record.host, exapp_record.port = k8s_upstream
+                        exapp_record.resolved_host = ""
+                        LOGGER.info("Resolved K8s upstream for '%s': %s:%d", exapp_id, *k8s_upstream)
                     LOGGER.info("Received new ExApp record: %s", exapp_record)
                     EXAPP_CACHE[exapp_id_lower] = exapp_record
                 except ValidationError as e:
@@ -1664,6 +1841,1000 @@ def _get_certificate_update_command(os_info_content: str | None) -> list[str] | 
 
 
 ###############################################################################
+# Kubernetes helpers functions
+###############################################################################
+
+
+def _get_k8s_token() -> str | None:
+    """Get (and cache) the Kubernetes bearer token."""
+    global K8S_TOKEN
+    if K8S_TOKEN:
+        return K8S_TOKEN.strip()
+    if K8S_TOKEN_FILE and os.path.exists(K8S_TOKEN_FILE):
+        try:
+            with open(K8S_TOKEN_FILE, encoding="utf-8") as f:
+                token = f.read().strip()
+                if token:
+                    K8S_TOKEN = token
+                    return token
+        except Exception as e:
+            LOGGER.error("Failed to read Kubernetes token file '%s': %s", K8S_TOKEN_FILE, e)
+    LOGGER.error(
+        "Kubernetes bearer token not found. "
+        "Set HP_K8S_BEARER_TOKEN or HP_K8S_BEARER_TOKEN_FILE when HP_K8S_ENABLED=true."
+    )
+    return None
+
+
+def _get_k8s_ssl_context() -> ssl.SSLContext | bool:
+    """Return SSL context (or False to disable verification) for K8s API."""
+    if not K8S_API_SERVER or not K8S_API_SERVER.startswith("https"):
+        return False
+    if not K8S_VERIFY_SSL:
+        return False
+    try:
+        cafile = K8S_CA_FILE if K8S_CA_FILE and os.path.exists(K8S_CA_FILE) else None
+        return ssl.create_default_context(cafile=cafile)
+    except Exception as e:
+        LOGGER.warning("Failed to create SSL context for Kubernetes API: %s", e)
+        return ssl.create_default_context()
+
+
+def _ensure_k8s_configured() -> None:
+    if not K8S_ENABLED:
+        LOGGER.error("Kubernetes backend requested but HP_K8S_ENABLED is not true.")
+        raise web.HTTPServiceUnavailable(text="Kubernetes backend is disabled in HaRP.")
+    if not K8S_API_SERVER:
+        LOGGER.error("Kubernetes backend requested but HP_K8S_API_SERVER is not configured.")
+        raise web.HTTPServiceUnavailable(text="Kubernetes API server is not configured.")
+    if not _get_k8s_token():
+        raise web.HTTPServiceUnavailable(text="Kubernetes token is not configured.")
+
+
+async def _k8s_request(
+    method: str,
+    path: str,
+    *,
+    query: dict[str, str] | None = None,
+    json_body: Any | None = None,
+    content_type: str | None = None,
+) -> tuple[int, dict[str, Any] | None, str]:
+    """Low-level helper for talking to the Kubernetes API."""
+    _ensure_k8s_configured()
+    token = _get_k8s_token()
+    assert token  # ensured by _ensure_k8s_configured  # noqa TO-DO
+
+    headers: dict[str, str] = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    if json_body is not None:
+        headers["Content-Type"] = content_type or "application/json"
+
+    url = f"{K8S_API_SERVER}{path}"
+    ssl_ctx = _get_k8s_ssl_context()
+    connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+
+    async with aiohttp.ClientSession(timeout=K8S_HTTP_TIMEOUT, connector=connector) as session:
+        try:
+            async with session.request(method.upper(), url, headers=headers, params=query, json=json_body) as resp:
+                text = await resp.text()
+                data: dict[str, Any] | None = None
+                if "application/json" in resp.headers.get("Content-Type", "") and text:
+                    try:
+                        data = json.loads(text)
+                    except json.JSONDecodeError:
+                        LOGGER.warning("Failed to parse JSON from Kubernetes API %s %s: %s", method, url, text[:200])
+                return resp.status, data, text
+        except aiohttp.ClientError as e:
+            LOGGER.error("Error communicating with Kubernetes API (%s %s): %s", method, url, e)
+            raise web.HTTPServiceUnavailable(text="Error communicating with Kubernetes API") from e
+
+
+def _k8s_parse_env(env_list: list[str]) -> list[dict[str, str]]:
+    """Convert ['KEY=VALUE', ...] to Kubernetes env entries."""
+    result: list[dict[str, str]] = []
+    for raw in env_list:
+        if not raw:
+            continue
+        if "=" in raw:
+            name, value = raw.split("=", 1)
+            result.append({"name": name, "value": value})
+        else:
+            result.append({"name": raw, "value": ""})  # No '=', keep name and use empty value
+    return result
+
+
+def _k8s_build_resources(resource_limits: dict[str, Any]) -> dict[str, Any]:
+    """Convert limits to Kubernetes resources.
+
+    Supports both:
+      - Docker-style: {"memory": <bytes>, "nanoCPUs": <int>}
+      - K8s-style:    {"memory": "512Mi", "cpu": "500m"}
+    """
+    if not resource_limits:
+        return {}
+    limits: dict[str, str] = {}
+    requests: dict[str, str] = {}
+
+    # Memory
+    mem_val = resource_limits.get("memory")
+    mem_str: str | None = None
+    if isinstance(mem_val, int) and mem_val > 0:
+        # bytes -> Mi (ceil)
+        mem_mi = (mem_val + (1024 * 1024 - 1)) // (1024 * 1024)
+        mem_str = f"{mem_mi}Mi"
+    elif isinstance(mem_val, str) and mem_val:
+        mem_str = mem_val  # Already in K8s units, e.g. "512Mi"
+
+    if mem_str:
+        limits["memory"] = mem_str
+        requests["memory"] = mem_str  # conservative: same as limit
+
+    # CPU
+    cpu_str: str | None = None
+    nano_cpus = resource_limits.get("nanoCPUs")
+    if isinstance(nano_cpus, int) and nano_cpus > 0:
+        milli = (nano_cpus * 1000 + 1_000_000_000 - 1) // 1_000_000_000  # 1e9 nanoCPUs = 1 CPU => millicores
+        milli = max(1, milli)
+        cpu_str = f"{milli}m"
+    else:
+        cpu_val = resource_limits.get("cpu")
+        if isinstance(cpu_val, str) and cpu_val:
+            cpu_str = cpu_val  # Already in K8s units, e.g. "500m"
+
+    if cpu_str:
+        limits["cpu"] = cpu_str
+        requests["cpu"] = cpu_str
+
+    res: dict[str, Any] = {}
+    if limits:
+        res["limits"] = limits
+    if requests:
+        res["requests"] = requests
+    return res
+
+
+def _k8s_build_deployment_manifest(payload: CreateExAppPayload, replicas: int) -> dict[str, Any]:
+    """Build a Deployment manifest from CreateExAppPayload."""
+    deployment_name = payload.exapp_k8s_name
+    pvc_name = payload.exapp_k8s_volume_name
+
+    labels = {
+        "app": deployment_name,
+        "app.kubernetes.io/name": deployment_name,
+        "app.kubernetes.io/component": "exapp",
+    }
+    if payload.instance_id:
+        labels["app.kubernetes.io/instance"] = payload.instance_id
+
+    container: dict[str, Any] = {
+        "name": "app",
+        "image": payload.image_id,
+        "imagePullPolicy": "IfNotPresent",
+        "env": _k8s_parse_env(payload.environment_variables),
+    }
+
+    resources = _k8s_build_resources(payload.resource_limits)
+    if resources:
+        container["resources"] = resources
+
+    # Main data volume
+    volumes = [
+        {
+            "name": "data",
+            "persistentVolumeClaim": {"claimName": pvc_name},
+        }
+    ]
+    volume_mounts = [
+        {
+            "name": "data",
+            "mountPath": f"/{payload.exapp_container_volume}",
+        }
+    ]
+
+    if payload.mount_points:
+        LOGGER.warning(
+            "Kubernetes backend currently ignores additional mount_points for ExApp '%s'.",
+            deployment_name,
+        )
+
+    container["volumeMounts"] = volume_mounts
+
+    manifest: dict[str, Any] = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": deployment_name, "labels": labels},
+        "spec": {
+            "replicas": replicas,
+            "selector": {"matchLabels": {"app": deployment_name}},
+            "template": {"metadata": {"labels": labels}, "spec": {"containers": [container], "volumes": volumes}},
+        },
+    }
+    manifest["spec"]["template"]["spec"] = {"containers": [container], "volumes": volumes}
+    return manifest
+
+
+def _k8s_build_service_manifest(
+    payload: ExposeExAppPayload, service_type: Literal["NodePort", "ClusterIP", "LoadBalancer"]
+) -> dict[str, Any]:
+    service_name = payload.exapp_k8s_name
+    labels = {
+        "app": service_name,
+        "app.kubernetes.io/name": service_name,
+        "app.kubernetes.io/component": "exapp",
+        **(payload.service_labels or {}),
+    }
+    if payload.instance_id:
+        labels.setdefault("app.kubernetes.io/instance", payload.instance_id)
+
+    metadata: dict[str, Any] = {"name": service_name, "labels": labels}
+    if payload.service_annotations:
+        metadata["annotations"] = payload.service_annotations
+
+    svc_port = payload.service_port or payload.port
+    port_entry: dict[str, Any] = {
+        "name": "http",
+        "port": svc_port,
+        "targetPort": payload.port,
+    }
+    if service_type == "NodePort" and payload.node_port:
+        port_entry["nodePort"] = payload.node_port
+
+    spec: dict[str, Any] = {
+        "type": service_type,
+        "selector": {"app": service_name},
+        "ports": [port_entry],
+    }
+
+    if payload.external_traffic_policy and service_type in ("NodePort", "LoadBalancer"):
+        spec["externalTrafficPolicy"] = payload.external_traffic_policy
+
+    if service_type == "LoadBalancer" and payload.load_balancer_ip:
+        spec["loadBalancerIP"] = payload.load_balancer_ip
+
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": metadata,
+        "spec": spec,
+    }
+
+
+async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
+    """Look up the K8s Service for an ExApp and return the correct (host, port).
+
+    Called on cache miss so that after a HaRP restart the correct upstream
+    address is recovered from the live Service rather than relying on
+    Nextcloud metadata (which stores the container-internal host/port).
+    Returns None if K8s is disabled or no matching Service exists.
+    """
+    if not K8S_ENABLED or not K8S_API_SERVER or not _get_k8s_token():
+        return None
+
+    try:
+        exapp = ExAppName(name=app_name)
+    except Exception:
+        return None
+
+    service_name = exapp.exapp_k8s_name
+    status, svc, _ = await _k8s_request(
+        "GET",
+        f"/api/v1/namespaces/{K8S_NAMESPACE}/services/{service_name}",
+    )
+    if status != 200 or not isinstance(svc, dict):
+        return None
+
+    svc_type = (svc.get("spec") or {}).get("type", "ClusterIP")
+    try:
+        if svc_type == "NodePort":
+            port = _k8s_extract_nodeport(svc)
+            host = await _k8s_pick_node_address(preferred_type="InternalIP")
+            return (host, port)
+        elif svc_type == "ClusterIP":
+            port = _k8s_extract_service_port(svc)
+            host = _k8s_service_dns_name(service_name, K8S_NAMESPACE)
+            return (host, port)
+        elif svc_type == "LoadBalancer":
+            port = _k8s_extract_service_port(svc)
+            host = _k8s_extract_loadbalancer_host(svc)
+            if host:
+                return (host, port)
+    except Exception as e:
+        LOGGER.warning("Failed to resolve K8s upstream for '%s': %s", app_name, e)
+    return None
+
+
+def _k8s_service_dns_name(service_name: str, namespace: str) -> str:
+    # Cluster domain suffix is typically .svc.cluster.local, but .svc is enough inside most resolvers.
+    return f"{service_name}.{namespace}.svc"
+
+
+async def _k8s_pick_node_address(
+    *,
+    preferred_type: Literal["InternalIP", "ExternalIP"],
+    node_name: str | None = None,
+    label_selector: str | None = None,
+) -> str:
+    query = {"labelSelector": label_selector} if label_selector else None
+    status, nodes_data, text = await _k8s_request("GET", "/api/v1/nodes", query=query)
+    if status != 200 or not isinstance(nodes_data, dict):
+        msg = (nodes_data or {}).get("message") if isinstance(nodes_data, dict) else text
+        raise web.HTTPServiceUnavailable(text=f"Failed to list Kubernetes nodes: Status {status}, {msg}")
+
+    items = nodes_data.get("items", [])
+    if node_name:
+        items = [n for n in items if n.get("metadata", {}).get("name") == node_name]
+
+    if not items:
+        raise web.HTTPServiceUnavailable(text="No Kubernetes nodes found (after filtering).")
+
+    def is_ready(node: dict[str, Any]) -> bool:
+        for cond in node.get("status", {}).get("conditions", []) or []:
+            if cond.get("type") == "Ready" and cond.get("status") == "True":
+                return True
+        return False
+
+    ready_nodes = [n for n in items if is_ready(n)]
+    nodes = ready_nodes or items
+
+    fallback_type = "ExternalIP" if preferred_type == "InternalIP" else "InternalIP"
+    address_type_order = [preferred_type, fallback_type, "Hostname"]
+
+    for node in nodes:
+        for t in address_type_order:
+            for addr in node.get("status", {}).get("addresses", []) or []:
+                if addr.get("type") == t and addr.get("address"):
+                    return str(addr["address"])
+
+    raise web.HTTPServiceUnavailable(text="Could not determine a node address (no InternalIP/ExternalIP/Hostname).")
+
+
+def _k8s_extract_nodeport(service: dict[str, Any]) -> int:
+    ports = (service.get("spec") or {}).get("ports") or []
+    if not ports or "nodePort" not in ports[0]:
+        raise web.HTTPServiceUnavailable(text="Service has no nodePort assigned.")
+    return int(ports[0]["nodePort"])
+
+
+def _k8s_extract_service_port(service: dict[str, Any]) -> int:
+    ports = (service.get("spec") or {}).get("ports") or []
+    if not ports or "port" not in ports[0]:
+        raise web.HTTPServiceUnavailable(text="Service has no port defined.")
+    return int(ports[0]["port"])
+
+
+def _k8s_extract_loadbalancer_host(service: dict[str, Any]) -> str | None:
+    ingress = ((service.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
+    if not ingress:
+        return None
+    first = ingress[0] or {}
+    return first.get("ip") or first.get("hostname")
+
+
+async def _k8s_wait_for_loadbalancer_host(service_name: str, timeout_s: float, interval_s: float) -> str:
+    deadline = time.time() + max(0.0, timeout_s)
+    while True:
+        status, svc, text = await _k8s_request(
+            "GET",
+            f"/api/v1/namespaces/{K8S_NAMESPACE}/services/{service_name}",
+        )
+        if status != 200 or not isinstance(svc, dict):
+            msg = (svc or {}).get("message") if isinstance(svc, dict) else text
+            raise web.HTTPServiceUnavailable(text=f"Failed to read Service '{service_name}': Status {status}, {msg}")
+
+        host = _k8s_extract_loadbalancer_host(svc)
+        if host:
+            return host
+
+        if time.time() >= deadline:
+            raise web.HTTPServiceUnavailable(
+                text=f"Timed out waiting for LoadBalancer address for Service '{service_name}'"
+            )
+
+        await asyncio.sleep(interval_s)
+
+
+###############################################################################
+# Endpoints for AppAPI to work with the Kubernetes API
+###############################################################################
+
+
+async def k8s_exapp_exists(request: web.Request):
+    try:
+        payload_dict = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON body") from None
+    try:
+        payload = ExAppName.model_validate(payload_dict)
+    except ValidationError as e:
+        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+
+    deployment_name = payload.exapp_k8s_name
+    LOGGER.debug(
+        "Checking for Kubernetes deployment '%s' in namespace '%s'.",
+        deployment_name,
+        K8S_NAMESPACE,
+    )
+    status, data, _ = await _k8s_request(
+        "GET",
+        f"/apis/apps/v1/namespaces/{K8S_NAMESPACE}/deployments/{deployment_name}",
+    )
+    if status == 200:
+        LOGGER.info("Kubernetes deployment '%s' exists.", deployment_name)
+        return web.json_response({"exists": True})
+    if status == 404:
+        LOGGER.info("Kubernetes deployment '%s' does not exist.", deployment_name)
+        return web.json_response({"exists": False})
+    msg = (data or {}).get("message", "")
+    LOGGER.error(
+        "Error checking Kubernetes deployment '%s' (status %s): %s",
+        deployment_name,
+        status,
+        msg,
+    )
+    raise web.HTTPServiceUnavailable(text=f"Error checking Kubernetes deployment '{deployment_name}': Status {status}")
+
+
+async def k8s_exapp_create(request: web.Request):
+    try:
+        payload_dict = await request.json()
+    except json.JSONDecodeError:
+        LOGGER.warning("Invalid JSON body received for /k8s/exapp/create")
+        raise web.HTTPBadRequest(text="Invalid JSON body") from None
+    try:
+        payload = CreateExAppPayload.model_validate(payload_dict)
+    except ValidationError as e:
+        LOGGER.warning("Payload validation error for /k8s/exapp/create: %s", e)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+
+    deployment_name = payload.exapp_k8s_name
+    pvc_name = payload.exapp_k8s_volume_name
+
+    LOGGER.info(
+        "Creating Kubernetes resources for ExApp '%s' (Deployment=%s, PVC=%s, namespace=%s).",
+        payload.name,
+        deployment_name,
+        pvc_name,
+        K8S_NAMESPACE,
+    )
+
+    # 1) PVC for data
+    pvc_manifest: dict[str, Any] = {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": pvc_name,
+            "labels": {
+                "app": deployment_name,
+                "app.kubernetes.io/name": deployment_name,
+                "app.kubernetes.io/component": "exapp",
+            },
+        },
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "resources": {"requests": {"storage": K8S_DEFAULT_STORAGE_SIZE}},
+        },
+    }
+    if K8S_STORAGE_CLASS:
+        pvc_manifest["spec"]["storageClassName"] = K8S_STORAGE_CLASS
+
+    status, data, text = await _k8s_request(
+        "POST",
+        f"/api/v1/namespaces/{K8S_NAMESPACE}/persistentvolumeclaims",
+        json_body=pvc_manifest,
+    )
+    if status in (200, 201):
+        LOGGER.info("PVC '%s' created for ExApp '%s'.", pvc_name, deployment_name)
+    elif status == 409:
+        LOGGER.info("PVC '%s' already exists for ExApp '%s'.", pvc_name, deployment_name)
+    else:
+        msg = (data or {}).get("message") if isinstance(data, dict) else text
+        LOGGER.error(
+            "Failed to create PVC '%s' for exapp '%s' (status %s): %s",
+            pvc_name,
+            deployment_name,
+            status,
+            msg,
+        )
+        raise web.HTTPServiceUnavailable(text=f"Failed to create PVC '{pvc_name}': Status {status}")
+
+    # 2) Deployment with replicas=0 (start/stop handled separately)
+    deployment_manifest = _k8s_build_deployment_manifest(payload, replicas=0)
+    status, data, text = await _k8s_request(
+        "POST",
+        f"/apis/apps/v1/namespaces/{K8S_NAMESPACE}/deployments",
+        json_body=deployment_manifest,
+    )
+    if status in (200, 201):
+        LOGGER.info("Kubernetes deployment '%s' created.", deployment_name)
+        # Docker endpoint returns {"id": ..., "name": ...}; we don't have Deployment UID here, only name.
+        return web.json_response({"name": deployment_name}, status=201)
+    if status == 409:
+        LOGGER.warning("Kubernetes deployment '%s' already exists.", deployment_name)
+        raise web.HTTPConflict(text=f"Deployment '{deployment_name}' already exists.")
+    msg = (data or {}).get("message") if isinstance(data, dict) else text
+    LOGGER.error(
+        "Error creating Kubernetes deployment '%s' (status %s): %s",
+        deployment_name,
+        status,
+        msg,
+    )
+    raise web.HTTPServiceUnavailable(text=f"Error creating deployment '{deployment_name}': Status {status}")
+
+
+async def k8s_exapp_start(request: web.Request):
+    try:
+        payload_dict = await request.json()
+    except json.JSONDecodeError:
+        LOGGER.warning("Invalid JSON body received for /k8s/exapp/start")
+        raise web.HTTPBadRequest(text="Invalid JSON body") from None
+    try:
+        payload = ExAppName.model_validate(payload_dict)
+    except ValidationError as e:
+        LOGGER.warning("Payload validation error for /k8s/exapp/start: %s", e)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+
+    deployment_name = payload.exapp_k8s_name
+    patch_body = {"spec": {"replicas": 1}}
+
+    LOGGER.info(
+        "Scaling Kubernetes deployment '%s' to 1 replica in namespace '%s'.",
+        deployment_name,
+        K8S_NAMESPACE,
+    )
+
+    status, data, text = await _k8s_request(
+        "PATCH",
+        f"/apis/apps/v1/namespaces/{K8S_NAMESPACE}/deployments/{deployment_name}",
+        json_body=patch_body,
+        content_type="application/strategic-merge-patch+json",
+    )
+    if status in (200, 201):
+        LOGGER.info("Deployment '%s' scaled to 1 replica.", deployment_name)
+        return web.HTTPNoContent()
+    if status == 404:
+        LOGGER.warning("Deployment '%s' not found when trying to start.", deployment_name)
+        raise web.HTTPNotFound(text=f"Deployment '{deployment_name}' not found.")
+    msg = (data or {}).get("message") if isinstance(data, dict) else text
+    LOGGER.error(
+        "Error scaling deployment '%s' to 1 replica (status %s): %s",
+        deployment_name,
+        status,
+        msg,
+    )
+    raise web.HTTPServiceUnavailable(text=f"Error starting deployment '{deployment_name}': Status {status}")
+
+
+async def k8s_exapp_stop(request: web.Request):
+    try:
+        payload_dict = await request.json()
+    except json.JSONDecodeError:
+        LOGGER.warning("Invalid JSON body received for /k8s/exapp/stop")
+        raise web.HTTPBadRequest(text="Invalid JSON body") from None
+    try:
+        payload = ExAppName.model_validate(payload_dict)
+    except ValidationError as e:
+        LOGGER.warning("Payload validation error for /k8s/exapp/stop: %s", e)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+
+    deployment_name = payload.exapp_k8s_name
+    patch_body = {"spec": {"replicas": 0}}
+
+    LOGGER.info(
+        "Scaling Kubernetes deployment '%s' to 0 replicas in namespace '%s'.",
+        deployment_name,
+        K8S_NAMESPACE,
+    )
+
+    status, data, text = await _k8s_request(
+        "PATCH",
+        f"/apis/apps/v1/namespaces/{K8S_NAMESPACE}/deployments/{deployment_name}",
+        json_body=patch_body,
+        content_type="application/strategic-merge-patch+json",
+    )
+    if status in (200, 201):
+        LOGGER.info("Deployment '%s' scaled to 0 replicas.", deployment_name)
+        return web.HTTPNoContent()
+    if status == 404:
+        LOGGER.warning("Deployment '%s' not found when trying to stop.", deployment_name)
+        raise web.HTTPNotFound(text=f"Deployment '{deployment_name}' not found.")
+    msg = (data or {}).get("message") if isinstance(data, dict) else text
+    LOGGER.error(
+        "Error scaling deployment '%s' to 0 replicas (status %s): %s",
+        deployment_name,
+        status,
+        msg,
+    )
+    raise web.HTTPServiceUnavailable(text=f"Error stopping deployment '{deployment_name}': Status {status}")
+
+
+async def k8s_exapp_wait_for_start(request: web.Request):
+    try:
+        payload_dict = await request.json()
+    except json.JSONDecodeError:
+        LOGGER.warning("Invalid JSON body received for /k8s/exapp/wait_for_start")
+        raise web.HTTPBadRequest(text="Invalid JSON body") from None
+    try:
+        payload = ExAppName.model_validate(payload_dict)
+    except ValidationError as e:
+        LOGGER.warning("Payload validation error for /k8s/exapp/wait_for_start: %s", e)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+
+    deployment_name = payload.exapp_k8s_name
+    label_selector = f"app={deployment_name}"
+
+    max_tries = 180
+    sleep_interval = 0.5
+
+    LOGGER.info(
+        "Waiting for Kubernetes pod(s) of deployment '%s' to become Ready "
+        "(namespace=%s, max_tries=%d, interval=%.1fs).",
+        deployment_name,
+        K8S_NAMESPACE,
+        max_tries,
+        sleep_interval,
+    )
+
+    last_phase: str | None = None
+    last_reason: str | None = None
+    last_message: str | None = None
+
+    for attempt in range(max_tries):
+        status, data, text = await _k8s_request(
+            "GET",
+            f"/api/v1/namespaces/{K8S_NAMESPACE}/pods",
+            query={"labelSelector": label_selector},
+        )
+        if status != 200:
+            msg = (data or {}).get("message") if isinstance(data, dict) else text
+            LOGGER.error(
+                "Error listing pods for deployment '%s' (status %s, attempt %d): %s",
+                deployment_name,
+                status,
+                attempt + 1,
+                msg,
+            )
+            raise web.HTTPServiceUnavailable(
+                text=f"Error listing pods for deployment '{deployment_name}': Status {status}"
+            )
+
+        items = (data or {}).get("items", []) if isinstance(data, dict) else []
+        if not items:
+            LOGGER.debug(
+                "No pods yet for deployment '%s' (attempt %d/%d).",
+                deployment_name,
+                attempt + 1,
+                max_tries,
+            )
+            last_phase = "Pending"
+        else:
+            # Take the first pod; for single-replica deployments this is enough.
+            pod = items[0]
+            pod_status = pod.get("status", {})
+            phase = pod_status.get("phase", "Unknown")
+            last_phase = phase
+            conditions = pod_status.get("conditions", [])
+            ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions)
+            last_reason = pod_status.get("reason")
+            last_message = pod_status.get("message")
+
+            LOGGER.debug(
+                "Pod status for '%s' (attempt %d/%d): phase=%s, ready=%s, reason=%s, message=%s",
+                deployment_name,
+                attempt + 1,
+                max_tries,
+                phase,
+                ready,
+                last_reason,
+                last_message,
+            )
+
+            if phase == "Running" and ready:
+                LOGGER.info("Deployment '%s' pod is Running and Ready.", deployment_name)
+                return web.json_response(
+                    {
+                        "started": True,
+                        "status": "running",
+                        "health": "ready",
+                        "reason": last_reason,
+                        "message": last_message,
+                    }
+                )
+
+            if phase in ("Failed", "Unknown", "Succeeded"):
+                LOGGER.warning(
+                    "Deployment '%s' pod is in phase '%s', treating as not successfully started.",
+                    deployment_name,
+                    phase,
+                )
+                return web.json_response(
+                    {
+                        "started": False,
+                        "status": phase,
+                        "health": "not_ready",
+                        "reason": last_reason,
+                        "message": last_message,
+                    }
+                )
+
+        if attempt < max_tries - 1:
+            await asyncio.sleep(sleep_interval)
+
+    LOGGER.warning(
+        "Deployment '%s' did not become Ready within %d attempts.",
+        deployment_name,
+        max_tries,
+    )
+    return web.json_response(
+        {
+            "started": False,
+            "status": last_phase or "unknown",
+            "health": "timeout",
+            "reason": last_reason,
+            "message": last_message,
+        }
+    )
+
+
+async def k8s_exapp_remove(request: web.Request):
+    try:
+        payload_dict = await request.json()
+    except json.JSONDecodeError:
+        LOGGER.warning("Invalid JSON body received for /k8s/exapp/remove")
+        raise web.HTTPBadRequest(text="Invalid JSON body") from None
+    try:
+        payload = RemoveExAppPayload.model_validate(payload_dict)
+    except ValidationError as e:
+        LOGGER.warning("Payload validation error for /k8s/exapp/remove: %s", e)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+
+    deployment_name = payload.exapp_k8s_name
+    pvc_name = payload.exapp_k8s_volume_name
+    service_name = payload.exapp_k8s_name
+
+    LOGGER.info(
+        "Removing Kubernetes deployment '%s' (namespace=%s, remove_data=%s).",
+        deployment_name,
+        K8S_NAMESPACE,
+        payload.remove_data,
+    )
+
+    # Delete Deployment
+    status, data, text = await _k8s_request(
+        "DELETE",
+        f"/apis/apps/v1/namespaces/{K8S_NAMESPACE}/deployments/{deployment_name}",
+    )
+    if status in (200, 202, 404):
+        LOGGER.info("Deployment '%s' removed or did not exist (status=%s).", deployment_name, status)
+    else:
+        msg = (data or {}).get("message") if isinstance(data, dict) else text
+        LOGGER.error(
+            "Error removing deployment '%s' (status %s): %s",
+            deployment_name,
+            status,
+            msg,
+        )
+        raise web.HTTPServiceUnavailable(text=f"Error removing deployment '{deployment_name}': Status {status}")
+
+    # Optionally delete PVC (data)
+    if payload.remove_data:
+        LOGGER.info("Removing PVC '%s' for deployment '%s'.", pvc_name, deployment_name)
+        status, data, text = await _k8s_request(
+            "DELETE",
+            f"/api/v1/namespaces/{K8S_NAMESPACE}/persistentvolumeclaims/{pvc_name}",
+        )
+        if status in (200, 202, 404):
+            LOGGER.info("PVC '%s' removed or did not exist (status=%s).", pvc_name, status)
+        else:
+            msg = (data or {}).get("message") if isinstance(data, dict) else text
+            LOGGER.error(
+                "Error removing PVC '%s' (status %s): %s",
+                pvc_name,
+                status,
+                msg,
+            )
+            raise web.HTTPServiceUnavailable(text=f"Error removing PVC '{pvc_name}': Status {status}")
+
+    # Always try to delete Service (if ExApp was exposed)
+    LOGGER.info("Removing Service '%s' for deployment '%s'.", service_name, deployment_name)
+    status, data, text = await _k8s_request(
+        "DELETE",
+        f"/api/v1/namespaces/{K8S_NAMESPACE}/services/{service_name}",
+    )
+
+    if status in (200, 202, 404):
+        LOGGER.info("Service '%s' removed or did not exist (status=%s).", service_name, status)
+        return web.HTTPNoContent()
+    msg = (data or {}).get("message") if isinstance(data, dict) else text
+    LOGGER.error("Error removing Service '%s' (status %s): %s", service_name, status, msg)
+    raise web.HTTPServiceUnavailable(text=f"Error removing Service '{service_name}': Status {status}")
+
+
+async def k8s_exapp_install_certificates(request: web.Request):
+    """Kubernetes backend: install_certificates is currently a no-op.
+
+    For Kubernetes, we recommend handling system and FRP certificates via Secrets
+    and volume mounts in the Deployment spec rather than exec'ing into containers.
+    """
+    try:
+        _ = InstallCertificatesPayload.model_validate(await request.json())
+    except json.JSONDecodeError:
+        LOGGER.warning("Invalid JSON body received for /k8s/exapp/install_certificates")
+        raise web.HTTPBadRequest(text="Invalid JSON body") from None
+    except ValidationError as e:
+        LOGGER.warning("Payload validation error for /k8s/exapp/install_certificates: %s", e)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+
+    LOGGER.info(
+        "Kubernetes backend: /k8s/exapp/install_certificates is a no-op. "
+        "Use Kubernetes Secrets + volume mounts instead."
+    )
+    return web.HTTPNoContent()
+
+
+async def k8s_exapp_expose(request: web.Request):
+    try:
+        payload_dict = await request.json()
+    except json.JSONDecodeError:
+        LOGGER.warning("Invalid JSON body received for /k8s/exapp/expose")
+        raise web.HTTPBadRequest(text="Invalid JSON body") from None
+
+    try:
+        payload = ExposeExAppPayload.model_validate(payload_dict)
+    except ValidationError as e:
+        LOGGER.warning("Payload validation error for /k8s/exapp/expose: %s", e)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+
+    app_id = payload.name.lower()
+    service_name = payload.exapp_k8s_name
+
+    # 0) Manual mode: no Kubernetes calls, just register upstream endpoint
+    if payload.expose_type == "manual":
+        upstream_host = payload.upstream_host  # validated non-empty
+        upstream_port = int(payload.upstream_port or payload.port)
+        LOGGER.info(
+            "Expose ExApp '%s' (manual): registering upstream %s:%d",
+            app_id,
+            upstream_host,
+            upstream_port,
+        )
+    else:
+        _ensure_k8s_configured()
+
+        # 1) Ensure Service exists with desired type
+        if payload.expose_type == "nodeport":
+            desired_type: Literal["NodePort", "ClusterIP", "LoadBalancer"] = "NodePort"
+        elif payload.expose_type == "clusterip":
+            desired_type = "ClusterIP"
+        elif payload.expose_type == "loadbalancer":
+            desired_type = "LoadBalancer"
+        else:
+            raise web.HTTPBadRequest(text=f"Unknown expose_type '{payload.expose_type}'")
+
+        service_manifest = _k8s_build_service_manifest(payload, desired_type)
+        LOGGER.info(
+            "Ensuring Service for ExApp '%s' (service=%s, type=%s, namespace=%s).",
+            app_id,
+            service_name,
+            desired_type,
+            K8S_NAMESPACE,
+        )
+
+        status, data, text = await _k8s_request(
+            "POST",
+            f"/api/v1/namespaces/{K8S_NAMESPACE}/services",
+            json_body=service_manifest,
+        )
+        if status in (200, 201):
+            LOGGER.info("Service '%s' created.", service_name)
+        elif status == 409:
+            LOGGER.info("Service '%s' already exists, will re-use it.", service_name)
+        else:
+            msg = (data or {}).get("message") if isinstance(data, dict) else text
+            LOGGER.error("Failed to create Service '%s' (status %s): %s", service_name, status, msg)
+            raise web.HTTPServiceUnavailable(text=f"Failed to create Service '{service_name}': Status {status}")
+
+        # 2) Read Service back
+        status, svc, text = await _k8s_request(
+            "GET",
+            f"/api/v1/namespaces/{K8S_NAMESPACE}/services/{service_name}",
+        )
+        if status != 200 or not isinstance(svc, dict):
+            msg = (svc or {}).get("message") if isinstance(svc, dict) else text
+            LOGGER.error("Failed to read Service '%s' (status %s): %s", service_name, status, msg)
+            raise web.HTTPServiceUnavailable(text=f"Failed to read Service '{service_name}': Status {status}")
+
+        # 3) Determine upstream endpoint HaRP should use
+        if payload.expose_type == "nodeport":
+            node_port = _k8s_extract_nodeport(svc)
+            upstream_port = node_port
+
+            # Prefer explicit upstream_host (recommended); else auto-pick a node address
+            if payload.upstream_host:
+                upstream_host = payload.upstream_host
+            else:
+                upstream_host = await _k8s_pick_node_address(
+                    preferred_type=payload.node_address_type,
+                    node_name=payload.node_name,
+                    label_selector=payload.node_label_selector,
+                )
+
+            LOGGER.info(
+                "Expose ExApp '%s' (nodeport): upstream %s:%d (service=%s).",
+                app_id,
+                upstream_host,
+                upstream_port,
+                service_name,
+            )
+
+        elif payload.expose_type == "clusterip":
+            upstream_port = _k8s_extract_service_port(svc)
+            upstream_host = payload.upstream_host or _k8s_service_dns_name(service_name, K8S_NAMESPACE)
+
+            LOGGER.info(
+                "Expose ExApp '%s' (clusterip): upstream %s:%d (service=%s).",
+                app_id,
+                upstream_host,
+                upstream_port,
+                service_name,
+            )
+
+        else:  # loadbalancer
+            upstream_port = _k8s_extract_service_port(svc)
+
+            if payload.upstream_host:
+                upstream_host = payload.upstream_host
+            else:
+                upstream_host = _k8s_extract_loadbalancer_host(svc)
+                if not upstream_host:
+                    upstream_host = await _k8s_wait_for_loadbalancer_host(
+                        service_name,
+                        timeout_s=payload.wait_timeout_seconds,
+                        interval_s=payload.wait_interval_seconds,
+                    )
+
+            LOGGER.info(
+                "Expose ExApp '%s' (loadbalancer): upstream %s:%d (service=%s).",
+                app_id,
+                upstream_host,
+                upstream_port,
+                service_name,
+            )
+
+    # 4) Fetch ExApp metadata from Nextcloud and override host/port registered in HaRP cache
+    try:
+        exapp_meta = await nc_get_exapp(app_id)
+        if not exapp_meta:
+            LOGGER.error("No ExApp metadata for '%s' in Nextcloud.", app_id)
+            raise web.HTTPNotFound(text=f"No ExApp metadata for '{app_id}'")
+    except web.HTTPException:
+        raise
+    except Exception as e:
+        LOGGER.exception("Failed to fetch ExApp metadata for '%s'", app_id)
+        raise web.HTTPServiceUnavailable(text=f"Failed to fetch metadata for '{app_id}'") from e
+
+    exapp_meta.host = upstream_host
+    exapp_meta.port = int(upstream_port)
+    exapp_meta.resolved_host = ""  # force resolve_ip again
+
+    async with EXAPP_CACHE_LOCK:
+        EXAPP_CACHE[app_id] = exapp_meta
+
+    # Keep old response fields, add useful extras
+    return web.json_response(
+        {
+            "appId": app_id,
+            "host": upstream_host,
+            "port": int(upstream_port),
+            "exposeType": payload.expose_type,
+            "serviceName": service_name,
+            "namespace": K8S_NAMESPACE,
+        }
+    )
+
+
+###############################################################################
 # HTTP Server Setup
 ###############################################################################
 
@@ -1688,6 +2859,16 @@ def create_web_app() -> web.Application:
     app.router.add_post("/docker/exapp/wait_for_start", docker_exapp_wait_for_start)
     app.router.add_post("/docker/exapp/remove", docker_exapp_remove)
     app.router.add_post("/docker/exapp/install_certificates", docker_exapp_install_certificates)
+
+    # Kubernetes APIs wrappers
+    app.router.add_post("/k8s/exapp/exists", k8s_exapp_exists)
+    app.router.add_post("/k8s/exapp/create", k8s_exapp_create)
+    app.router.add_post("/k8s/exapp/start", k8s_exapp_start)
+    app.router.add_post("/k8s/exapp/stop", k8s_exapp_stop)
+    app.router.add_post("/k8s/exapp/wait_for_start", k8s_exapp_wait_for_start)
+    app.router.add_post("/k8s/exapp/remove", k8s_exapp_remove)
+    app.router.add_post("/k8s/exapp/install_certificates", k8s_exapp_install_certificates)
+    app.router.add_post("/k8s/exapp/expose", k8s_exapp_expose)
     return app
 
 
