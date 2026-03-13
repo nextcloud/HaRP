@@ -633,7 +633,21 @@ def resolve_ip(hostname: str) -> str:
 
 
 async def get_info(request: web.Request):
-    return web.json_response({"version": 0.3})
+    k8s_status: dict[str, Any] = {"enabled": K8S_ENABLED}
+    if K8S_ENABLED:
+        k8s_status["api_server"] = K8S_API_SERVER or ""
+        try:
+            _ensure_k8s_configured()
+            status, _, _ = await _k8s_request("GET", "/api")
+            k8s_status["reachable"] = status == 200
+        except Exception:
+            k8s_status["reachable"] = False
+
+    return web.json_response({
+        "version": 0.3,
+        "docker": True,
+        "kubernetes": k8s_status,
+    })
 
 
 ###############################################################################
