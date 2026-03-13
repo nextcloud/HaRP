@@ -49,6 +49,7 @@ if not K8S_API_SERVER and os.environ.get("KUBERNETES_SERVICE_HOST"):
     K8S_API_SERVER = f"https://{host}:{port}"
 
 K8S_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60.0)
+_k8s_session: aiohttp.ClientSession | None = None
 K8S_NAME_MAX_LENGTH = 63
 # Set up the logging configuration
 LOG_LEVEL = os.environ.get("HP_LOG_LEVEL", "INFO").upper()
@@ -1865,6 +1866,32 @@ def _ensure_k8s_configured() -> None:
         raise web.HTTPServiceUnavailable(text="Kubernetes token is not configured.")
 
 
+def _get_k8s_session() -> aiohttp.ClientSession:
+    """Return a reusable aiohttp session for the Kubernetes API.
+
+    Lazily creates a module-level singleton with connection pooling.
+    The session is reused across all K8s API calls, avoiding the overhead
+    of a new TCP+TLS handshake per request.
+    """
+    global _k8s_session
+    if _k8s_session is None or _k8s_session.closed:
+        ssl_ctx = _get_k8s_ssl_context()
+        connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+        _k8s_session = aiohttp.ClientSession(
+            timeout=K8S_HTTP_TIMEOUT,
+            connector=connector,
+        )
+    return _k8s_session
+
+
+async def _close_k8s_session(_app: web.Application = None) -> None:
+    """Close the K8s session on shutdown to avoid ResourceWarning."""
+    global _k8s_session
+    if _k8s_session is not None and not _k8s_session.closed:
+        await _k8s_session.close()
+        _k8s_session = None
+
+
 async def _k8s_request(
     method: str,
     path: str,
@@ -1884,23 +1911,21 @@ async def _k8s_request(
         headers["Content-Type"] = content_type or "application/json"
 
     url = f"{K8S_API_SERVER}{path}"
-    ssl_ctx = _get_k8s_ssl_context()
-    connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+    session = _get_k8s_session()
 
-    async with aiohttp.ClientSession(timeout=K8S_HTTP_TIMEOUT, connector=connector) as session:
-        try:
-            async with session.request(method.upper(), url, headers=headers, params=query, json=json_body) as resp:
-                text = await resp.text()
-                data: dict[str, Any] | None = None
-                if "application/json" in resp.headers.get("Content-Type", "") and text:
-                    try:
-                        data = json.loads(text)
-                    except json.JSONDecodeError:
-                        LOGGER.warning("Failed to parse JSON from Kubernetes API %s %s: %s", method, url, text[:200])
-                return resp.status, data, text
-        except aiohttp.ClientError as e:
-            LOGGER.error("Error communicating with Kubernetes API (%s %s): %s", method, url, e)
-            raise web.HTTPServiceUnavailable(text="Error communicating with Kubernetes API") from e
+    try:
+        async with session.request(method.upper(), url, headers=headers, params=query, json=json_body) as resp:
+            text = await resp.text()
+            data: dict[str, Any] | None = None
+            if "application/json" in resp.headers.get("Content-Type", "") and text:
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    LOGGER.warning("Failed to parse JSON from Kubernetes API %s %s: %s", method, url, text[:200])
+            return resp.status, data, text
+    except aiohttp.ClientError as e:
+        LOGGER.error("Error communicating with Kubernetes API (%s %s): %s", method, url, e)
+        raise web.HTTPServiceUnavailable(text="Error communicating with Kubernetes API") from e
 
 
 def _k8s_parse_env(env_list: list[str]) -> list[dict[str, str]]:
@@ -2789,6 +2814,7 @@ def create_web_app() -> web.Application:
     app.router.add_post("/k8s/exapp/remove", k8s_exapp_remove)
     app.router.add_post("/k8s/exapp/install_certificates", k8s_exapp_install_certificates)
     app.router.add_post("/k8s/exapp/expose", k8s_exapp_expose)
+    app.on_shutdown.append(_close_k8s_session)
     return app
 
 
