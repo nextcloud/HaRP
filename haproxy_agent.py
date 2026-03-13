@@ -37,7 +37,7 @@ K8S_ENABLED = os.environ.get("HP_K8S_ENABLED", "false").lower() in {"1", "true",
 K8S_NAMESPACE = os.environ.get("HP_K8S_NAMESPACE", "nextcloud-exapps")
 K8S_API_SERVER = os.environ.get("HP_K8S_API_SERVER")  # e.g. https://kubernetes.default.svc
 K8S_CA_FILE = os.environ.get("HP_K8S_CA_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
-K8S_TOKEN = os.environ.get("HP_K8S_BEARER_TOKEN")
+K8S_TOKEN_ENV = os.environ.get("HP_K8S_BEARER_TOKEN")  # static token from env (never rotated)
 K8S_TOKEN_FILE = os.environ.get("HP_K8S_BEARER_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token")
 K8S_VERIFY_SSL = os.environ.get("HP_K8S_VERIFY_SSL", "true").lower() != "false"
 K8S_STORAGE_CLASS = os.environ.get("HP_K8S_STORAGE_CLASS", "")
@@ -1817,16 +1817,19 @@ def _k8s_error_msg(data: dict[str, Any] | None, text: str) -> str:
 
 
 def _get_k8s_token() -> str | None:
-    """Get (and cache) the Kubernetes bearer token."""
-    global K8S_TOKEN
-    if K8S_TOKEN:
-        return K8S_TOKEN.strip()
+    """Get the Kubernetes bearer token.
+
+    If HP_K8S_BEARER_TOKEN env var is set, returns the static value.
+    Otherwise re-reads the token file on every call so that kubelet-rotated
+    projected service account tokens (default ~1h lifetime) are picked up automatically.
+    """
+    if K8S_TOKEN_ENV:
+        return K8S_TOKEN_ENV.strip()
     if K8S_TOKEN_FILE and os.path.exists(K8S_TOKEN_FILE):
         try:
             with open(K8S_TOKEN_FILE, encoding="utf-8") as f:
                 token = f.read().strip()
                 if token:
-                    K8S_TOKEN = token
                     return token
         except Exception as e:
             LOGGER.error("Failed to read Kubernetes token file '%s': %s", K8S_TOKEN_FILE, e)
