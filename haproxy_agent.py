@@ -1953,6 +1953,8 @@ def _k8s_build_resources(resource_limits: dict[str, Any], compute_device: str = 
 
     if compute_device == "cuda":
         limits["nvidia.com/gpu"] = "1"
+    elif compute_device == "rocm":
+        limits["amd.com/gpu"] = "1"
 
     res: dict[str, Any] = {}
     if limits:
