@@ -2212,7 +2212,8 @@ async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
         label_selector = f"app.kubernetes.io/part-of={base_k8s_name}"
         status, svc_list, _ = await _k8s_request(
             "GET",
-            f"/api/v1/namespaces/{K8S_NAMESPACE}/services?labelSelector={label_selector}",
+            f"/api/v1/namespaces/{K8S_NAMESPACE}/services",
+            query={"labelSelector": label_selector},
         )
         if status == 200 and isinstance(svc_list, dict):
             items = svc_list.get("items") or []
