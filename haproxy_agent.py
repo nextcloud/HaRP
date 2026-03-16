@@ -330,7 +330,7 @@ async def record_session(pass_cookie: str, nc_user: NcUser) -> None:
     now = time.time()
     async with SESSION_CACHE_LOCK:
         SESSION_CACHE[pass_cookie] = (nc_user, now)
-    LOGGER.error("Recorded session for cookie %s, User %s", pass_cookie, nc_user.user_id)
+    LOGGER.info("Recorded session for cookie %s, User %s", pass_cookie, nc_user.user_id)
 
 
 async def get_session(pass_cookie: str) -> NcUser | None:
@@ -345,7 +345,7 @@ async def get_session(pass_cookie: str) -> NcUser | None:
                 return nc_user
             # Session expired, remove it
             del SESSION_CACHE[pass_cookie]
-            LOGGER.error("Session for cookie %s expired", pass_cookie)
+            LOGGER.info("Session for cookie %s expired", pass_cookie)
     return None
 
 
