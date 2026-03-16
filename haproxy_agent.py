@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 import asyncio
+import collections
 import contextlib
 import io
 import ipaddress
@@ -240,7 +241,7 @@ class ExposeExAppPayload(ExAppName):
 
 EXAPP_CACHE: dict[str, ExApp] = {}
 _EXAPP_INFLIGHT: dict[str, asyncio.Future[ExApp | None]] = {}
-_EXAPP_NEGATIVE_CACHE: dict[str, float] = {}  # exapp_id -> expiry monotonic timestamp
+_EXAPP_NEGATIVE_CACHE: collections.OrderedDict[str, float] = collections.OrderedDict()
 _NEGATIVE_CACHE_TTL = 15.0  # seconds to cache "ExApp not found" results
 
 SESSION_CACHE_LOCK = asyncio.Lock()
@@ -594,6 +595,16 @@ async def _fetch_exapp_record(exapp_id: str) -> ExApp | None:
     return exapp_record
 
 
+def _negative_cache_evict_expired() -> None:
+    """Remove expired entries from the front of the ordered negative cache."""
+    now = time.monotonic()
+    while _EXAPP_NEGATIVE_CACHE:
+        _, expiry = next(iter(_EXAPP_NEGATIVE_CACHE.items()))
+        if now < expiry:
+            break
+        _EXAPP_NEGATIVE_CACHE.popitem(last=False)
+
+
 async def _get_or_fetch_exapp(exapp_id: str) -> ExApp | None:
     """Get ExApp from cache, or fetch with request coalescing.
 
@@ -632,6 +643,7 @@ async def _get_or_fetch_exapp(exapp_id: str) -> ExApp | None:
             LOGGER.info("Received new ExApp record: %s", exapp_record)
             EXAPP_CACHE[exapp_id] = exapp_record
         else:
+            _negative_cache_evict_expired()
             _EXAPP_NEGATIVE_CACHE[exapp_id] = time.monotonic() + _NEGATIVE_CACHE_TTL
         fut.set_result(exapp_record)
         return exapp_record
