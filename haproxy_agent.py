@@ -2256,7 +2256,14 @@ def _k8s_build_service_manifest(
 
 
 async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
-    """Look up K8s Service for an ExApp, return (host, port) or None."""
+    """Look up K8s Service for an ExApp, return (host, port) or None.
+
+    Returns None when K8s is disabled or no Service exists (Docker ExApp).
+    Raises web.HTTPServiceUnavailable when the K8s API returned an error
+    (e.g. 403 token expired, 500 server error) so the caller knows not to
+    cache the result with stale NC-provided host/port.
+    Connection-level errors already raise via _k8s_request.
+    """
     if not K8S_ENABLED or not K8S_API_SERVER or not _get_k8s_token():
         return None
 
@@ -2266,6 +2273,7 @@ async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
         return None
 
     svc: dict[str, Any] | None = None
+    got_k8s_error = False
 
     # Try the base Service name first (single-role / legacy ExApps).
     service_name = exapp.exapp_k8s_name
@@ -2275,6 +2283,8 @@ async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
     )
     if status == 200 and isinstance(data, dict):
         svc = data
+    elif status != 404:
+        got_k8s_error = True
 
     # Fallback: search for any Service labelled for this ExApp (multi-role).
     if svc is None:
@@ -2290,8 +2300,19 @@ async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
             if items:
                 svc = items[0]
                 service_name = (svc.get("metadata") or {}).get("name", service_name)
+        elif status != 200:
+            got_k8s_error = True
 
     if svc is None:
+        if got_k8s_error:
+            LOGGER.warning(
+                "K8s API returned error during Service lookup for '%s'; "
+                "will not cache stale record",
+                app_name,
+            )
+            raise web.HTTPServiceUnavailable(
+                text=f"K8s API error during Service lookup for '{app_name}'"
+            )
         return None
 
     svc_type = (svc.get("spec") or {}).get("type", "ClusterIP")
