@@ -652,10 +652,11 @@ async def nc_get_user(app_id: str, all_headers: dict[str, str]) -> NcUser | None
         params={"appId": app_id},
     ) as resp:
         if not resp.ok:
-            LOGGER.info("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
+            error_text = await resp.text()
+            LOGGER.info("Failed to fetch user info from Nextcloud: %s", error_text)
             if resp.status // 100 == 4:
                 return None
-            raise Exception("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
+            raise Exception("Failed to fetch user info from Nextcloud.", error_text)
         data = await resp.json()
         return NcUser.model_validate(data)
 
