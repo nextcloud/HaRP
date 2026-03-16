@@ -238,8 +238,10 @@ class ExposeExAppPayload(ExAppName):
 # In-memory caches
 ###############################################################################
 
-EXAPP_CACHE_LOCK = asyncio.Lock()
 EXAPP_CACHE: dict[str, ExApp] = {}
+_EXAPP_INFLIGHT: dict[str, asyncio.Future[ExApp | None]] = {}
+_EXAPP_NEGATIVE_CACHE: dict[str, float] = {}  # exapp_id -> expiry monotonic timestamp
+_NEGATIVE_CACHE_TTL = 15.0  # seconds to cache "ExApp not found" results
 
 SESSION_CACHE_LOCK = asyncio.Lock()
 SESSION_CACHE: dict[str, tuple[NcUser, float]] = {}  # Stores NcUser and timestamp
@@ -400,60 +402,33 @@ async def exapps_msg(
             await record_ip_failure(client_ip)
             return reply.set_txn_var("bad_request", 1)
         authorization_app_api = request_headers["authorization-app-api"]
-        # Prefer cached upstream (K8s expose sets correct host/port in cache)
-        async with EXAPP_CACHE_LOCK:
-            cached = EXAPP_CACHE.get(exapp_id_lower)
-        if cached:
-            exapp_record = cached
-        else:
+        # Use unified fetch path (cache + singleflight + K8s resolution)
+        try:
+            exapp_record = await _get_or_fetch_exapp(exapp_id_lower)
+        except Exception:
+            exapp_record = None
+        if not exapp_record:
+            # ExApp not in Nextcloud yet (e.g. during /init) — use headers as fallback
             exapp_record = ExApp(
                 exapp_token="",
                 exapp_version=request_headers["ex-app-version"],
                 host=request_headers["ex-app-host"],
                 port=int(request_headers["ex-app-port"]),
             )
-            # For K8s ExApps: resolve upstream from live Service
-            k8s_upstream = await _k8s_resolve_exapp_upstream(exapp_id_lower)
-            if k8s_upstream:
-                # Fetch full record (with token & routes) so cache is complete
-                try:
-                    full_record = await nc_get_exapp(exapp_id_lower)
-                except Exception:
-                    full_record = None
-                if full_record:
-                    exapp_record = full_record
-                exapp_record.host, exapp_record.port = k8s_upstream
-                exapp_record.resolved_host = ""
-                LOGGER.info("Resolved K8s upstream for '%s': %s:%d", exapp_id, *k8s_upstream)
-                # Only cache if we have the full record (token + routes)
-                if full_record:
-                    async with EXAPP_CACHE_LOCK:
-                        EXAPP_CACHE[exapp_id_lower] = exapp_record
 
     if not exapp_record:
-        async with EXAPP_CACHE_LOCK:
-            exapp_record = EXAPP_CACHE.get(exapp_id_lower)
+        try:
+            exapp_record = await _get_or_fetch_exapp(exapp_id_lower)
             if not exapp_record:
-                try:
-                    exapp_record = await nc_get_exapp(exapp_id_lower)
-                    if not exapp_record:
-                        LOGGER.error("No such ExApp enabled: %s", exapp_id)
-                        await record_ip_failure(client_ip_str)
-                        return reply.set_txn_var("not_found", 1)
-                    # For K8s ExApps: resolve upstream from live Service
-                    k8s_upstream = await _k8s_resolve_exapp_upstream(exapp_id_lower)
-                    if k8s_upstream:
-                        exapp_record.host, exapp_record.port = k8s_upstream
-                        exapp_record.resolved_host = ""
-                        LOGGER.info("Resolved K8s upstream for '%s': %s:%d", exapp_id, *k8s_upstream)
-                    LOGGER.info("Received new ExApp record: %s", exapp_record)
-                    EXAPP_CACHE[exapp_id_lower] = exapp_record
-                except ValidationError as e:
-                    LOGGER.error("Invalid ExApp metadata from Nextcloud: %s", e)
-                    return reply.set_txn_var("not_found", 1)
-                except Exception as e:
-                    LOGGER.exception("Failed to fetch ExApp metadata from Nextcloud", exc_info=e)
-                    return reply.set_txn_var("not_found", 1)
+                LOGGER.error("No such ExApp enabled: %s", exapp_id)
+                await record_ip_failure(client_ip_str)
+                return reply.set_txn_var("not_found", 1)
+        except ValidationError as e:
+            LOGGER.error("Invalid ExApp metadata from Nextcloud: %s", e)
+            return reply.set_txn_var("not_found", 1)
+        except Exception as e:
+            LOGGER.exception("Failed to fetch ExApp metadata from Nextcloud", exc_info=e)
+            return reply.set_txn_var("not_found", 1)
 
     route_allowed = False
     if authorization_app_api:
@@ -591,11 +566,81 @@ async def nc_get_exapp(app_id: str) -> ExApp | None:
         EX_APP_URL, headers={"harp-shared-key": SHARED_KEY}, params={"appId": app_id}
     ) as resp:
         if not resp.ok:
-            if resp.status == 404:
+            if resp.status in (401, 404):
+                # 404 = ExApp not found; 401 = ExApp not found so key can't be
+                # validated against a daemon config (Nextcloud returns 401 for
+                # non-existent apps because it has no daemon to check the key).
                 return None
             raise Exception("Failed to fetch ExApp metadata from Nextcloud.", await resp.text())
         data = await resp.json()
         return ExApp.model_validate(data)
+
+
+async def _fetch_exapp_record(exapp_id: str) -> ExApp | None:
+    """Fetch ExApp metadata from Nextcloud and optionally resolve K8s upstream.
+
+    Performs network I/O (Nextcloud HTTP + K8s API).  Must NEVER be called
+    under a lock.  Returns a fully-populated ExApp ready for caching, or
+    None if the ExApp is not found/enabled in Nextcloud.
+    """
+    exapp_record = await nc_get_exapp(exapp_id)
+    if not exapp_record:
+        return None
+    k8s_upstream = await _k8s_resolve_exapp_upstream(exapp_id)
+    if k8s_upstream:
+        exapp_record.host, exapp_record.port = k8s_upstream
+        exapp_record.resolved_host = ""
+        LOGGER.info("Resolved K8s upstream for '%s': %s:%d", exapp_id, *k8s_upstream)
+    return exapp_record
+
+
+async def _get_or_fetch_exapp(exapp_id: str) -> ExApp | None:
+    """Get ExApp from cache, or fetch with request coalescing.
+
+    Fast path: returns cached record immediately.
+    Negative-cache path: if we recently confirmed this ExApp doesn't exist,
+    return None without network I/O.
+    On cache miss: if another coroutine is already fetching this ExApp,
+    awaits its result (singleflight).  Otherwise initiates the fetch and
+    lets other coroutines await our result.
+
+    Safety: between the _EXAPP_INFLIGHT.get() check and the dict insert
+    there is no ``await``, so no coroutine interleaving can occur in
+    single-threaded asyncio — only one coroutine wins the race.
+    """
+    cached = EXAPP_CACHE.get(exapp_id)
+    if cached is not None:
+        return cached
+
+    neg_expiry = _EXAPP_NEGATIVE_CACHE.get(exapp_id)
+    if neg_expiry is not None:
+        if time.monotonic() < neg_expiry:
+            return None
+        _EXAPP_NEGATIVE_CACHE.pop(exapp_id, None)
+
+    inflight = _EXAPP_INFLIGHT.get(exapp_id)
+    if inflight is not None:
+        return await inflight
+
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[ExApp | None] = loop.create_future()
+    _EXAPP_INFLIGHT[exapp_id] = fut
+
+    try:
+        exapp_record = await _fetch_exapp_record(exapp_id)
+        if exapp_record is not None:
+            LOGGER.info("Received new ExApp record: %s", exapp_record)
+            EXAPP_CACHE[exapp_id] = exapp_record
+        else:
+            _EXAPP_NEGATIVE_CACHE[exapp_id] = time.monotonic() + _NEGATIVE_CACHE_TTL
+        fut.set_result(exapp_record)
+        return exapp_record
+    except BaseException as exc:
+        if not fut.done():
+            fut.set_exception(exc)
+        raise
+    finally:
+        _EXAPP_INFLIGHT.pop(exapp_id, None)
 
 
 async def nc_get_user(app_id: str, all_headers: dict[str, str]) -> NcUser | None:
@@ -658,18 +703,17 @@ async def get_info(request: web.Request):
 
 async def add_exapp(request: web.Request):
     data = await request.json()
-    # Overwrite if already exists
-    async with EXAPP_CACHE_LOCK:
-        try:
-            EXAPP_CACHE[request.match_info["app_id"].lower()] = ExApp.model_validate(data)
-        except ValidationError:
-            raise web.HTTPBadRequest() from None
+    app_id = request.match_info["app_id"].lower()
+    try:
+        EXAPP_CACHE[app_id] = ExApp.model_validate(data)
+        _EXAPP_NEGATIVE_CACHE.pop(app_id, None)
+    except ValidationError:
+        raise web.HTTPBadRequest() from None
     return web.HTTPNoContent()
 
 
 async def delete_exapp(request: web.Request):
-    async with EXAPP_CACHE_LOCK:
-        old = EXAPP_CACHE.pop(request.match_info["app_id"].lower(), None)
+    old = EXAPP_CACHE.pop(request.match_info["app_id"].lower(), None)
     if old is None:
         raise web.HTTPNotFound()
     return web.HTTPNoContent()
@@ -2764,8 +2808,8 @@ async def k8s_exapp_expose(request: web.Request):
     exapp_meta.port = int(upstream_port)
     exapp_meta.resolved_host = ""
 
-    async with EXAPP_CACHE_LOCK:
-        EXAPP_CACHE[app_id] = exapp_meta
+    EXAPP_CACHE[app_id] = exapp_meta
+    _EXAPP_NEGATIVE_CACHE.pop(app_id, None)
 
     return web.json_response(
         {
