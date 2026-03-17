@@ -545,7 +545,7 @@ Use the Docker Engine `/_ping` endpoint via HaRP’s ExApps HTTP frontend to con
 curl -fsS \
   -H "harp-shared-key: <HP_SHARED_KEY>" \
   -H "docker-engine-port: 24000" \
-  http://127.0.0.1:8780/exapps/app_api/v1.41/_ping
+  http://127.0.0.1:8780/exapps/app_api/v1.44/_ping
 ```
 
 * `24000` is the **default** FRP remote port used by the HaRP container for the **built‑in/local** Docker Engine (enabled when `/var/run/docker.sock` is mounted).
