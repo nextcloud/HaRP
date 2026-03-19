@@ -2267,6 +2267,78 @@ def _k8s_build_service_manifest(
     }
 
 
+def _extract_manual_upstream(annotations: dict[str, str], deploy_name: str) -> tuple[str, int] | None:
+    """Extract manual upstream host/port from Deployment annotations."""
+    if annotations.get("appapi.nextcloud.com/expose-type") != "manual":
+        return None
+
+    host = annotations.get("appapi.nextcloud.com/upstream-host")
+    port_str = annotations.get("appapi.nextcloud.com/upstream-port")
+    if not host or not port_str:
+        LOGGER.warning(
+            "Deployment '%s' has manual expose-type annotation but missing upstream-host/port.",
+            deploy_name,
+        )
+        return None
+
+    try:
+        port = int(port_str)
+    except ValueError:
+        LOGGER.warning("Invalid upstream-port annotation on Deployment '%s': %s", deploy_name, port_str)
+        return None
+    return (host, port)
+
+
+async def _k8s_resolve_manual_upstream(deployment_name: str, app_name: str) -> tuple[str, int] | None:
+    """Read manual-expose upstream config from Deployment annotations.
+
+    For expose_type=manual, no K8s Service is created.  Instead, the upstream
+    host and port are persisted as annotations on the Deployment during the
+    expose call.  This function reads those annotations to re-discover the
+    upstream after a cache eviction or HaRP restart.
+
+    Returns (host, port) if annotations are present, None otherwise (e.g. a
+    Docker-only ExApp that has no K8s Deployment at all).
+    """
+    # Try the base Deployment name first (single-role ExApps).
+    status, data, _ = await _k8s_request(
+        "GET",
+        f"/apis/apps/v1/namespaces/{K8S_NAMESPACE}/deployments/{deployment_name}",
+    )
+    if status == 200 and isinstance(data, dict):
+        annotations = (data.get("metadata") or {}).get("annotations") or {}
+        result = _extract_manual_upstream(annotations, deployment_name)
+        if result:
+            LOGGER.info("Resolved manual upstream for '%s' from Deployment annotations: %s:%d", app_name, *result)
+            return result
+    elif status != 404:
+        LOGGER.warning(
+            "K8s API error fetching Deployment '%s' for manual upstream (status %s)",
+            deployment_name, status,
+        )
+        return None
+
+    # Fallback: search for multi-role Deployments by label (the exposed role
+    # carries the manual annotations).
+    base_k8s_name = _sanitize_k8s_name(f"nc_app_{app_name}")
+    label_selector = f"app.kubernetes.io/part-of={base_k8s_name}"
+    status, deploy_list, _ = await _k8s_request(
+        "GET",
+        f"/apis/apps/v1/namespaces/{K8S_NAMESPACE}/deployments",
+        query={"labelSelector": label_selector},
+    )
+    if status == 200 and isinstance(deploy_list, dict):
+        for item in deploy_list.get("items") or []:
+            annotations = (item.get("metadata") or {}).get("annotations") or {}
+            d_name = (item.get("metadata") or {}).get("name", "")
+            result = _extract_manual_upstream(annotations, d_name)
+            if result:
+                LOGGER.info("Resolved manual upstream for '%s' from role Deployment '%s': %s:%d", app_name, d_name, *result)
+                return result
+
+    return None
+
+
 async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
     """Look up K8s Service for an ExApp, return (host, port) or None.
 
@@ -2325,7 +2397,10 @@ async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
             raise web.HTTPServiceUnavailable(
                 text=f"K8s API error during Service lookup for '{app_name}'"
             )
-        return None
+
+        # No Service found — check if this is a manual-expose ExApp by reading
+        # the upstream config stored as annotations on the Deployment.
+        return await _k8s_resolve_manual_upstream(exapp.exapp_k8s_name, app_name)
 
     svc_type = (svc.get("spec") or {}).get("type", "ClusterIP")
     try:
@@ -2781,6 +2856,34 @@ async def k8s_exapp_expose(request: web.Request):
     if payload.expose_type == "manual":
         upstream_host = payload.upstream_host
         upstream_port = int(payload.upstream_port or payload.port)
+
+        # Persist the manual upstream config as annotations on the Deployment so
+        # that _k8s_resolve_exapp_upstream() can re-discover it after a cache
+        # eviction or HaRP restart (no K8s Service exists for manual type).
+        # This is best-effort: if K8s is not configured or the PATCH fails, the
+        # expose still succeeds (upstream is cached in memory).
+        if K8S_ENABLED and K8S_API_SERVER and _get_k8s_token():
+            deploy_name = payload.exapp_k8s_name
+            annotation_patch = {
+                "metadata": {
+                    "annotations": {
+                        "appapi.nextcloud.com/expose-type": "manual",
+                        "appapi.nextcloud.com/upstream-host": upstream_host,
+                        "appapi.nextcloud.com/upstream-port": str(upstream_port),
+                    },
+                },
+            }
+            status, _, text = await _k8s_request(
+                "PATCH",
+                f"/apis/apps/v1/namespaces/{K8S_NAMESPACE}/deployments/{deploy_name}",
+                json_body=annotation_patch,
+                content_type="application/strategic-merge-patch+json",
+            )
+            if status not in (200, 201):
+                LOGGER.warning(
+                    "Failed to annotate Deployment '%s' with manual upstream (status %s): %s",
+                    deploy_name, status, text[:200] if text else "",
+                )
     else:
         _ensure_k8s_configured()
 
