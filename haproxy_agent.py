@@ -2356,14 +2356,6 @@ async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
     except Exception:
         return None
 
-    # Check Deployment annotations first: if this is a manual-expose ExApp the
-    # annotated upstream_host takes priority over any Service that might exist
-    # (the operator may have created the Service for pod routing, but HaRP
-    # should use the configured upstream_host, not the Service's ClusterIP DNS).
-    manual_result = await _k8s_resolve_manual_upstream(exapp.exapp_k8s_name, app_name)
-    if manual_result is not None:
-        return manual_result
-
     svc: dict[str, Any] | None = None
     got_k8s_error = False
 
@@ -2406,7 +2398,9 @@ async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
                 text=f"K8s API error during Service lookup for '{app_name}'"
             )
 
-        return None
+        # No Service found — check if this is a manual-expose ExApp by reading
+        # the upstream config stored as annotations on the Deployment.
+        return await _k8s_resolve_manual_upstream(exapp.exapp_k8s_name, app_name)
 
     svc_type = (svc.get("spec") or {}).get("type", "ClusterIP")
     try:
@@ -2416,7 +2410,15 @@ async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
             return (host, port)
         if svc_type == "ClusterIP":
             port = _k8s_extract_service_port(svc)
-            host = _k8s_service_dns_name(service_name, K8S_NAMESPACE)
+            # Use the actual ClusterIP address instead of DNS name.  DNS names
+            # like "svc.namespace.svc" only resolve inside the cluster, but HaRP
+            # may run outside (e.g. Docker on the host).  ClusterIPs are routable
+            # via iptables/ipvs from anywhere with kube-proxy access.
+            cluster_ip = (svc.get("spec") or {}).get("clusterIP")
+            if cluster_ip and cluster_ip != "None":
+                host = cluster_ip
+            else:
+                host = _k8s_service_dns_name(service_name, K8S_NAMESPACE)
             return (host, port)
         if svc_type == "LoadBalancer":
             port = _k8s_extract_service_port(svc)
