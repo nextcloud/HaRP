@@ -2227,6 +2227,7 @@ def _k8s_build_service_manifest(
         "app.kubernetes.io/name": service_name,
         "app.kubernetes.io/part-of": base_exapp_name,
         "app.kubernetes.io/component": "exapp",
+        "app.kubernetes.io/managed-by": "harp",
         **(payload.service_labels or {}),
     }
     if payload.instance_id:
@@ -2841,12 +2842,21 @@ async def k8s_exapp_remove(request: web.Request):
             LOGGER.error("Error removing PVC '%s' (status %s): %s", pvc_name, status, _k8s_error_msg(data, text))
             raise web.HTTPServiceUnavailable(text=f"Error removing PVC '{pvc_name}': Status {status}")
 
-    status, data, text = await _k8s_request(
-        "DELETE", f"/api/v1/namespaces/{K8S_NAMESPACE}/services/{deployment_name}",
-    )
-    if status not in (200, 202, 404):
-        LOGGER.error("Error removing Service '%s' (status %s): %s", deployment_name, status, _k8s_error_msg(data, text))
-        raise web.HTTPServiceUnavailable(text=f"Error removing Service '{deployment_name}': Status {status}")
+    # Only delete Services that HaRP created (labelled managed-by=harp).
+    # For manual expose, the operator manages the Service — don't delete it.
+    svc_path = f"/api/v1/namespaces/{K8S_NAMESPACE}/services/{deployment_name}"
+    status, svc_data, text = await _k8s_request("GET", svc_path)
+    if status == 200 and isinstance(svc_data, dict):
+        svc_labels = (svc_data.get("metadata") or {}).get("labels") or {}
+        if svc_labels.get("app.kubernetes.io/managed-by") == "harp":
+            status, data, text = await _k8s_request("DELETE", svc_path)
+            if status not in (200, 202, 404):
+                LOGGER.error("Error removing Service '%s' (status %s): %s", deployment_name, status, _k8s_error_msg(data, text))
+                raise web.HTTPServiceUnavailable(text=f"Error removing Service '{deployment_name}': Status {status}")
+        else:
+            LOGGER.info("Skipping deletion of externally-managed Service '%s'.", deployment_name)
+    elif status != 404:
+        LOGGER.warning("Error checking Service '%s' (status %s), skipping deletion.", deployment_name, status)
     return web.HTTPNoContent()
 
 
@@ -2871,27 +2881,30 @@ async def k8s_exapp_expose(request: web.Request):
         # This is best-effort: if K8s is not configured or the PATCH fails, the
         # expose still succeeds (upstream is cached in memory).
         if K8S_ENABLED and K8S_API_SERVER and _get_k8s_token():
-            deploy_name = payload.exapp_k8s_name
-            annotation_patch = {
-                "metadata": {
-                    "annotations": {
-                        "appapi.nextcloud.com/expose-type": "manual",
-                        "appapi.nextcloud.com/upstream-host": upstream_host,
-                        "appapi.nextcloud.com/upstream-port": str(upstream_port),
+            try:
+                deploy_name = payload.exapp_k8s_name
+                annotation_patch = {
+                    "metadata": {
+                        "annotations": {
+                            "appapi.nextcloud.com/expose-type": "manual",
+                            "appapi.nextcloud.com/upstream-host": upstream_host,
+                            "appapi.nextcloud.com/upstream-port": str(upstream_port),
+                        },
                     },
-                },
-            }
-            status, _, text = await _k8s_request(
-                "PATCH",
-                f"/apis/apps/v1/namespaces/{K8S_NAMESPACE}/deployments/{deploy_name}",
-                json_body=annotation_patch,
-                content_type="application/strategic-merge-patch+json",
-            )
-            if status not in (200, 201):
-                LOGGER.warning(
-                    "Failed to annotate Deployment '%s' with manual upstream (status %s): %s",
-                    deploy_name, status, text[:200] if text else "",
+                }
+                status, _, text = await _k8s_request(
+                    "PATCH",
+                    f"/apis/apps/v1/namespaces/{K8S_NAMESPACE}/deployments/{deploy_name}",
+                    json_body=annotation_patch,
+                    content_type="application/strategic-merge-patch+json",
                 )
+                if status not in (200, 201):
+                    LOGGER.warning(
+                        "Failed to annotate Deployment '%s' with manual upstream (status %s): %s",
+                        deploy_name, status, text[:200] if text else "",
+                    )
+            except Exception as e:
+                LOGGER.warning("Best-effort annotation PATCH failed for '%s': %s", payload.name, e)
     else:
         _ensure_k8s_configured()
 
