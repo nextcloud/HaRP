@@ -2356,6 +2356,14 @@ async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
     except Exception:
         return None
 
+    # Check Deployment annotations first: if this is a manual-expose ExApp the
+    # annotated upstream_host takes priority over any Service that might exist
+    # (the operator may have created the Service for pod routing, but HaRP
+    # should use the configured upstream_host, not the Service's ClusterIP DNS).
+    manual_result = await _k8s_resolve_manual_upstream(exapp.exapp_k8s_name, app_name)
+    if manual_result is not None:
+        return manual_result
+
     svc: dict[str, Any] | None = None
     got_k8s_error = False
 
@@ -2398,9 +2406,7 @@ async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
                 text=f"K8s API error during Service lookup for '{app_name}'"
             )
 
-        # No Service found — check if this is a manual-expose ExApp by reading
-        # the upstream config stored as annotations on the Deployment.
-        return await _k8s_resolve_manual_upstream(exapp.exapp_k8s_name, app_name)
+        return None
 
     svc_type = (svc.get("spec") or {}).get("type", "ClusterIP")
     try:
