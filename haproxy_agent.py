@@ -2749,7 +2749,24 @@ async def k8s_exapp_wait_for_start(request: web.Request):
                     }
                 )
 
-            if phase in ("Failed", "Unknown", "Succeeded"):
+            # Succeeded means the pod ran and exited 0 (e.g. init-only apps
+            # like app-skeleton-python).  Treat as successful start.
+            if phase == "Succeeded":
+                LOGGER.info(
+                    "Deployment '%s' pod completed successfully (phase=Succeeded).",
+                    deployment_name,
+                )
+                return web.json_response(
+                    {
+                        "started": True,
+                        "status": "succeeded",
+                        "health": "ready",
+                        "reason": last_reason,
+                        "message": last_message,
+                    }
+                )
+
+            if phase in ("Failed", "Unknown"):
                 LOGGER.warning(
                     "Deployment '%s' pod is in phase '%s', treating as not successfully started.",
                     deployment_name,
