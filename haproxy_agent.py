@@ -213,7 +213,7 @@ class InstallCertificatesPayload(ExAppName):
 
 class ExposeExAppPayload(ExAppName):
     port: int = Field(..., ge=1, le=65535, description="Port on which the ExApp listens inside the Pod/container.")
-    expose_type: Literal["nodeport", "clusterip", "loadbalancer", "manual"] = Field("nodeport")
+    expose_type: Literal["nodeport", "clusterip", "loadbalancer", "manual"] = Field("clusterip")
     upstream_host: str | None = Field(None, description="Host override. Required for expose_type=manual.")
     upstream_port: int | None = Field(None, ge=1, le=65535, description="Port override (manual only).")
     service_port: int | None = Field(None, ge=1, le=65535, description="Service port (defaults to payload.port).")
@@ -2941,7 +2941,18 @@ async def k8s_exapp_expose(request: web.Request):
             )
         elif payload.expose_type == "clusterip":
             upstream_port = _k8s_extract_service_port(svc)
-            upstream_host = payload.upstream_host or _k8s_service_dns_name(service_name, K8S_NAMESPACE)
+            # Use the actual ClusterIP address instead of DNS name.  DNS names
+            # like "svc.namespace.svc" only resolve inside the cluster, but HaRP
+            # may run outside (e.g. Docker on the host).  ClusterIPs are routable
+            # via iptables/ipvs from anywhere with kube-proxy access.
+            if not payload.upstream_host:
+                cluster_ip = (svc.get("spec") or {}).get("clusterIP")
+                if cluster_ip and cluster_ip != "None":
+                    upstream_host = cluster_ip
+                else:
+                    upstream_host = _k8s_service_dns_name(service_name, K8S_NAMESPACE)
+            else:
+                upstream_host = payload.upstream_host
         else:  # loadbalancer
             upstream_port = _k8s_extract_service_port(svc)
             upstream_host = payload.upstream_host or _k8s_extract_loadbalancer_host(svc)
