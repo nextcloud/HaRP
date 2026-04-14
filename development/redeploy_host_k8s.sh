@@ -48,10 +48,10 @@ PROXY_IP=$(docker inspect master-proxy-1 \
   --format "{{(index .NetworkSettings.Networks \"$NC_DOCKER_NETWORK\").IPAddress}}" 2>/dev/null || true)
 K8S_HOST_ALIASES=""
 if [ -n "$PROXY_IP" ]; then
-  K8S_HOST_ALIASES="nextcloud.local:${PROXY_IP}"
-  echo "    nextcloud.local -> $PROXY_IP"
+  K8S_HOST_ALIASES="${NC_HOSTNAME}:${PROXY_IP}"
+  echo "    ${NC_HOSTNAME} -> $PROXY_IP"
 else
-  echo "    WARNING: Could not detect proxy IP. ExApp pods may not resolve nextcloud.local."
+  echo "    WARNING: Could not detect proxy IP. ExApp pods may not resolve ${NC_HOSTNAME}."
 fi
 
 echo "==> Removing old HaRP container..."
