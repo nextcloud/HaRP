@@ -155,7 +155,9 @@ class ExAppName(BaseModel):
     @computed_field
     @property
     def exapp_container_volume(self) -> str:
-        return f"{self.exapp_container_name}_data"
+        # Role-agnostic multirole K8s Deployments share one PVC and mount it at the same path as APP_PERSISTENT_STORAGE
+        base = f"nc_app_{self.instance_id}_{self.name}" if self.instance_id else f"nc_app_{self.name}"
+        return f"{base}_data"
 
     @computed_field
     @property
@@ -2548,6 +2550,9 @@ async def k8s_exapp_create(request: web.Request):
     payload = await _parse_json_payload(request, CreateExAppPayload)
     deployment_name = payload.exapp_k8s_name
     pvc_name = payload.exapp_k8s_volume_name
+    base_exapp_name = _sanitize_k8s_name(
+        f"nc_app_{payload.instance_id}_{payload.name}" if payload.instance_id else f"nc_app_{payload.name}"
+    )
 
     LOGGER.info("Creating K8s resources for '%s' (ns=%s).", payload.name, K8S_NAMESPACE)
 
@@ -2557,9 +2562,9 @@ async def k8s_exapp_create(request: web.Request):
         "metadata": {
             "name": pvc_name,
             "labels": {
-                "app": deployment_name,
-                "app.kubernetes.io/name": deployment_name,
-                "app.kubernetes.io/component": "exapp",
+                "app.kubernetes.io/name": base_exapp_name,
+                "app.kubernetes.io/part-of": base_exapp_name,
+                "app.kubernetes.io/component": "exapp-data",
             },
         },
         "spec": {
