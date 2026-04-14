@@ -2071,7 +2071,15 @@ def _k8s_parse_host_aliases() -> list[dict[str, Any]]:
 
 
 async def _k8s_ensure_coredns_host_aliases() -> None:
-    """Patch CoreDNS to resolve HP_K8S_HOST_ALIASES cluster-wide."""
+    """Publish HP_K8S_HOST_ALIASES into the 'coredns-custom' ConfigMap so they resolve cluster-wide.
+
+    Uses k3s's /etc/coredns/custom/*.server import convention (also honoured by any CoreDNS
+    Deployment that mounts a 'coredns-custom' ConfigMap with optional=true). The main
+    'coredns' ConfigMap managed by the distribution operator is never touched; the 'reload'
+    plugin present in the stock Corefile picks up the new file within seconds, so no
+    Deployment restart is needed either. The ConfigMap key is prefixed 'harp-' so other
+    operators writing unrelated keys into 'coredns-custom' are not disturbed.
+    """
     if not K8S_ENABLED or not K8S_HOST_ALIASES_RAW.strip():
         return
 
@@ -2079,71 +2087,79 @@ async def _k8s_ensure_coredns_host_aliases() -> None:
     if not host_aliases:
         return
 
-    LOGGER.info("Ensuring CoreDNS resolves host aliases: %s", K8S_HOST_ALIASES_RAW)
+    # Build one standalone Corefile server block per zone. Entries share a single block
+    # to keep the file compact and to avoid plugin-instance conflicts between zones.
+    hosts_entries: list[str] = []
+    zone_names: list[str] = []
+    for alias in host_aliases:
+        for hostname in alias["hostnames"]:
+            hosts_entries.append(f"        {alias['ip']} {hostname}")
+            zone_names.append(f"{hostname}:53")
+
+    server_file = (
+        f"{' '.join(zone_names)} {{\n"
+        "    hosts {\n"
+        f"{chr(10).join(hosts_entries)}\n"
+        "        fallthrough\n"
+        "    }\n"
+        "    forward . /etc/resolv.conf\n"
+        "}\n"
+    )
+
+    cm_path = "/api/v1/namespaces/kube-system/configmaps/coredns-custom"
+    key = "harp-host-aliases.server"
+
+    LOGGER.info("Publishing %d host alias zone(s) into coredns-custom: %s", len(zone_names), K8S_HOST_ALIASES_RAW)
 
     try:
-        status, data, _text = await _k8s_request(
-            "GET", "/api/v1/namespaces/kube-system/configmaps/coredns",
-        )
-        if status != 200 or not data:
-            LOGGER.warning("Could not read CoreDNS ConfigMap (HTTP %d), skipping.", status)
-            return
+        status, existing, _text = await _k8s_request("GET", cm_path)
 
-        corefile = data.get("data", {}).get("Corefile", "")
-        if not corefile:
-            LOGGER.warning("CoreDNS ConfigMap has no Corefile entry, skipping.")
-            return
-
-        hosts_lines: list[str] = []
-        for alias in host_aliases:
-            for hostname in alias["hostnames"]:
-                hosts_lines.append(f"           {alias['ip']} {hostname}")
-        hosts_block = "hosts {\n" + "\n".join(hosts_lines) + "\n           fallthrough\n        }"
-
-        hosts_re = re.compile(r"hosts\s*\{[^}]*\}")
-        if hosts_re.search(corefile):
-            new_corefile = hosts_re.sub(hosts_block, corefile, count=1)
-        elif "forward ." in corefile:
-            new_corefile = corefile.replace("forward .", f"{hosts_block}\n        forward .", 1)
-        else:
-            LOGGER.warning(
-                "CoreDNS Corefile has no 'hosts' block and no 'forward' directive, cannot patch."
+        if status == 404:
+            configmap = {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "name": "coredns-custom",
+                    "namespace": "kube-system",
+                    "labels": {"app.kubernetes.io/managed-by": "harp"},
+                },
+                "data": {key: server_file},
+            }
+            status, _, _text = await _k8s_request(
+                "POST",
+                "/api/v1/namespaces/kube-system/configmaps",
+                json_body=configmap,
             )
+            if status in (200, 201):
+                LOGGER.info("Created coredns-custom ConfigMap with HaRP host aliases.")
+            else:
+                LOGGER.warning("Failed to create coredns-custom (HTTP %d): %s", status, _text[:200])
             return
 
-        if new_corefile == corefile:
-            LOGGER.info("CoreDNS already has correct host aliases, no patch needed.")
+        if status != 200 or not isinstance(existing, dict):
+            LOGGER.warning("Could not read coredns-custom (HTTP %d), skipping.", status)
             return
 
+        current = (existing.get("data") or {}).get(key)
+        if current == server_file:
+            LOGGER.info("coredns-custom already carries the expected HaRP host aliases, no patch needed.")
+            return
+
+        # Strategic merge patch on ConfigMap.data merges keys individually — unrelated keys
+        # written by other operators stay intact.
         status, _, _text = await _k8s_request(
             "PATCH",
-            "/api/v1/namespaces/kube-system/configmaps/coredns",
-            json_body={"data": {"Corefile": new_corefile}},
+            cm_path,
+            json_body={"data": {key: server_file}},
             content_type="application/strategic-merge-patch+json",
         )
-        if status != 200:
-            LOGGER.warning("Failed to patch CoreDNS ConfigMap (HTTP %d): %s", status, _text[:200])
-            return
-
-        restart_annotation = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        status, _, _text = await _k8s_request(
-            "PATCH",
-            "/apis/apps/v1/namespaces/kube-system/deployments/coredns",
-            json_body={
-                "spec": {"template": {"metadata": {"annotations": {
-                    "harp.nextcloud.com/restartedAt": restart_annotation,
-                }}}}
-            },
-            content_type="application/strategic-merge-patch+json",
-        )
-        if status != 200:
-            LOGGER.warning("Failed to restart CoreDNS Deployment (HTTP %d): %s", status, _text[:200])
-            return
-
-        LOGGER.info("CoreDNS patched and restarted with host aliases: %s", K8S_HOST_ALIASES_RAW)
+        if status == 200:
+            LOGGER.info("Updated coredns-custom with HaRP host aliases.")
+        else:
+            LOGGER.warning("Failed to patch coredns-custom (HTTP %d): %s", status, _text[:200])
 
     except Exception as exc:
-        LOGGER.warning("Failed to configure CoreDNS host aliases (non-fatal): %s", exc)
+        LOGGER.warning("Failed to configure coredns-custom host aliases (non-fatal): %s", exc)
 
 
 def _k8s_build_deployment_manifest(payload: CreateExAppPayload, replicas: int) -> dict[str, Any]:
