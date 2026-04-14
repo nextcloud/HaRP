@@ -32,24 +32,17 @@ echo "==> Generating fresh bearer token for SA '$K8S_SA' (valid 1 year)..."
 K8S_BEARER_TOKEN=$(kubectl --context "$K8S_CONTEXT" -n "$K8S_NAMESPACE" create token "$K8S_SA" --duration=8760h)
 echo "    Token generated (${#K8S_BEARER_TOKEN} chars)"
 
-# ── Ensure kind node can reach the Nextcloud Docker network ───────────
-echo "==> Connecting kind node '$KIND_NODE' to Docker network '$NC_DOCKER_NETWORK'..."
-if docker network connect "$NC_DOCKER_NETWORK" "$KIND_NODE" 2>/dev/null; then
-  echo "    Connected."
-else
-  echo "    Already connected (or network not found)."
-fi
-
-# Detect the nginx proxy IP on NC_DOCKER_NETWORK for pod DNS resolution.
+# Extract the kind container's gateway IP for pod DNS resolution.
 # Pods inside the kind cluster cannot resolve hostnames like "nextcloud.local" that only exist in the host's /etc/hosts.
-# Try to inject hostAliases so that ExApp pods can reach Nextcloud.
+# Try to inject hostAliases so that ExApp pods can reach Nextcloud on the host network.
 echo "==> Detecting nginx proxy IP for host aliases..."
-PROXY_IP=$(docker inspect master-proxy-1 \
-  --format "{{(index .NetworkSettings.Networks \"$NC_DOCKER_NETWORK\").IPAddress}}" 2>/dev/null || true)
+KIND_HOST_IP=$(docker inspect nc-exapps-control-plane \
+  --format "{{(index .NetworkSettings.Networks \"kind\").Gateway}}" 2>/dev/null || true)
+NC_HOSTNAME="$(echo $NC_INSTANCE_URL | awk -F[/:] '{print $4}')"
 K8S_HOST_ALIASES=""
-if [ -n "$PROXY_IP" ]; then
-  K8S_HOST_ALIASES="${NC_HOSTNAME}:${PROXY_IP}"
-  echo "    ${NC_HOSTNAME} -> $PROXY_IP"
+if [ -n "$KIND_HOST_IP" ]; then
+  K8S_HOST_ALIASES="${NC_HOSTNAME}:${KIND_HOST_IP}"
+  echo "    ${NC_HOSTNAME} -> $KIND_HOST_IP"
 else
   echo "    WARNING: Could not detect proxy IP. ExApp pods may not resolve ${NC_HOSTNAME}."
 fi
