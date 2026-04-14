@@ -2070,98 +2070,6 @@ def _k8s_parse_host_aliases() -> list[dict[str, Any]]:
     return [{"ip": ip, "hostnames": hosts} for ip, hosts in ip_to_hosts.items()]
 
 
-async def _k8s_ensure_coredns_host_aliases() -> None:
-    """Publish HP_K8S_HOST_ALIASES into the 'coredns-custom' ConfigMap so they resolve cluster-wide.
-
-    Uses k3s's /etc/coredns/custom/*.server import convention (also honoured by any CoreDNS
-    Deployment that mounts a 'coredns-custom' ConfigMap with optional=true). The main
-    'coredns' ConfigMap managed by the distribution operator is never touched; the 'reload'
-    plugin present in the stock Corefile picks up the new file within seconds, so no
-    Deployment restart is needed either. The ConfigMap key is prefixed 'harp-' so other
-    operators writing unrelated keys into 'coredns-custom' are not disturbed.
-    """
-    if not K8S_ENABLED or not K8S_HOST_ALIASES_RAW.strip():
-        return
-
-    host_aliases = _k8s_parse_host_aliases()
-    if not host_aliases:
-        return
-
-    # Build one standalone Corefile server block per zone. Entries share a single block
-    # to keep the file compact and to avoid plugin-instance conflicts between zones.
-    hosts_entries: list[str] = []
-    zone_names: list[str] = []
-    for alias in host_aliases:
-        for hostname in alias["hostnames"]:
-            hosts_entries.append(f"        {alias['ip']} {hostname}")
-            zone_names.append(f"{hostname}:53")
-
-    server_file = (
-        f"{' '.join(zone_names)} {{\n"
-        "    hosts {\n"
-        f"{chr(10).join(hosts_entries)}\n"
-        "        fallthrough\n"
-        "    }\n"
-        "    forward . /etc/resolv.conf\n"
-        "}\n"
-    )
-
-    cm_path = "/api/v1/namespaces/kube-system/configmaps/coredns-custom"
-    key = "harp-host-aliases.server"
-
-    LOGGER.info("Publishing %d host alias zone(s) into coredns-custom: %s", len(zone_names), K8S_HOST_ALIASES_RAW)
-
-    try:
-        status, existing, _text = await _k8s_request("GET", cm_path)
-
-        if status == 404:
-            configmap = {
-                "apiVersion": "v1",
-                "kind": "ConfigMap",
-                "metadata": {
-                    "name": "coredns-custom",
-                    "namespace": "kube-system",
-                    "labels": {"app.kubernetes.io/managed-by": "harp"},
-                },
-                "data": {key: server_file},
-            }
-            status, _, _text = await _k8s_request(
-                "POST",
-                "/api/v1/namespaces/kube-system/configmaps",
-                json_body=configmap,
-            )
-            if status in (200, 201):
-                LOGGER.info("Created coredns-custom ConfigMap with HaRP host aliases.")
-            else:
-                LOGGER.warning("Failed to create coredns-custom (HTTP %d): %s", status, _text[:200])
-            return
-
-        if status != 200 or not isinstance(existing, dict):
-            LOGGER.warning("Could not read coredns-custom (HTTP %d), skipping.", status)
-            return
-
-        current = (existing.get("data") or {}).get(key)
-        if current == server_file:
-            LOGGER.info("coredns-custom already carries the expected HaRP host aliases, no patch needed.")
-            return
-
-        # Strategic merge patch on ConfigMap.data merges keys individually — unrelated keys
-        # written by other operators stay intact.
-        status, _, _text = await _k8s_request(
-            "PATCH",
-            cm_path,
-            json_body={"data": {key: server_file}},
-            content_type="application/strategic-merge-patch+json",
-        )
-        if status == 200:
-            LOGGER.info("Updated coredns-custom with HaRP host aliases.")
-        else:
-            LOGGER.warning("Failed to patch coredns-custom (HTTP %d): %s", status, _text[:200])
-
-    except Exception as exc:
-        LOGGER.warning("Failed to configure coredns-custom host aliases (non-fatal): %s", exc)
-
-
 def _k8s_build_deployment_manifest(payload: CreateExAppPayload, replicas: int) -> dict[str, Any]:
     """Build a Deployment manifest from CreateExAppPayload."""
     deployment_name = payload.exapp_k8s_name
@@ -3086,9 +2994,6 @@ async def run_http_server(host="127.0.0.1", port=8200):
 
 
 async def main():
-    # Ensure cluster-wide DNS for host aliases before starting servers.
-    await _k8s_ensure_coredns_host_aliases()
-
     spoa_task = asyncio.create_task(SPOA_AGENT._run(host=SPOA_HOST, port=SPOA_PORT))  # noqa
     http_task = asyncio.create_task(run_http_server(host="127.0.0.1", port=8200))
 
