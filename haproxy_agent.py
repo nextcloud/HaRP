@@ -2070,82 +2070,6 @@ def _k8s_parse_host_aliases() -> list[dict[str, Any]]:
     return [{"ip": ip, "hostnames": hosts} for ip, hosts in ip_to_hosts.items()]
 
 
-async def _k8s_ensure_coredns_host_aliases() -> None:
-    """Patch CoreDNS to resolve HP_K8S_HOST_ALIASES cluster-wide."""
-    if not K8S_ENABLED or not K8S_HOST_ALIASES_RAW.strip():
-        return
-
-    host_aliases = _k8s_parse_host_aliases()
-    if not host_aliases:
-        return
-
-    LOGGER.info("Ensuring CoreDNS resolves host aliases: %s", K8S_HOST_ALIASES_RAW)
-
-    try:
-        status, data, _text = await _k8s_request(
-            "GET", "/api/v1/namespaces/kube-system/configmaps/coredns",
-        )
-        if status != 200 or not data:
-            LOGGER.warning("Could not read CoreDNS ConfigMap (HTTP %d), skipping.", status)
-            return
-
-        corefile = data.get("data", {}).get("Corefile", "")
-        if not corefile:
-            LOGGER.warning("CoreDNS ConfigMap has no Corefile entry, skipping.")
-            return
-
-        hosts_lines: list[str] = []
-        for alias in host_aliases:
-            for hostname in alias["hostnames"]:
-                hosts_lines.append(f"           {alias['ip']} {hostname}")
-        hosts_block = "hosts {\n" + "\n".join(hosts_lines) + "\n           fallthrough\n        }"
-
-        hosts_re = re.compile(r"hosts\s*\{[^}]*\}")
-        if hosts_re.search(corefile):
-            new_corefile = hosts_re.sub(hosts_block, corefile, count=1)
-        elif "forward ." in corefile:
-            new_corefile = corefile.replace("forward .", f"{hosts_block}\n        forward .", 1)
-        else:
-            LOGGER.warning(
-                "CoreDNS Corefile has no 'hosts' block and no 'forward' directive, cannot patch."
-            )
-            return
-
-        if new_corefile == corefile:
-            LOGGER.info("CoreDNS already has correct host aliases, no patch needed.")
-            return
-
-        status, _, _text = await _k8s_request(
-            "PATCH",
-            "/api/v1/namespaces/kube-system/configmaps/coredns",
-            json_body={"data": {"Corefile": new_corefile}},
-            content_type="application/strategic-merge-patch+json",
-        )
-        if status != 200:
-            LOGGER.warning("Failed to patch CoreDNS ConfigMap (HTTP %d): %s", status, _text[:200])
-            return
-
-        restart_annotation = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        status, _, _text = await _k8s_request(
-            "PATCH",
-            "/apis/apps/v1/namespaces/kube-system/deployments/coredns",
-            json_body={
-                "spec": {"template": {"metadata": {"annotations": {
-                    "harp.nextcloud.com/restartedAt": restart_annotation,
-                }}}}
-            },
-            content_type="application/strategic-merge-patch+json",
-        )
-        if status != 200:
-            LOGGER.warning("Failed to restart CoreDNS Deployment (HTTP %d): %s", status, _text[:200])
-            return
-
-        LOGGER.info("CoreDNS patched and restarted with host aliases: %s", K8S_HOST_ALIASES_RAW)
-
-    except Exception as exc:
-        LOGGER.warning("Failed to configure CoreDNS host aliases (non-fatal): %s", exc)
-
-
 def _k8s_build_deployment_manifest(payload: CreateExAppPayload, replicas: int) -> dict[str, Any]:
     """Build a Deployment manifest from CreateExAppPayload."""
     deployment_name = payload.exapp_k8s_name
@@ -3070,9 +2994,6 @@ async def run_http_server(host="127.0.0.1", port=8200):
 
 
 async def main():
-    # Ensure cluster-wide DNS for host aliases before starting servers.
-    await _k8s_ensure_coredns_host_aliases()
-
     spoa_task = asyncio.create_task(SPOA_AGENT._run(host=SPOA_HOST, port=SPOA_PORT))  # noqa
     http_task = asyncio.create_task(run_http_server(host="127.0.0.1", port=8200))
 
