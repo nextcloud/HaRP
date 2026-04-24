@@ -310,6 +310,20 @@ async def record_ip_failure(ip_address: str | IPv4Address | IPv6Address) -> None
         LOGGER.warning("Recorded failure for IP %s. Failures in window: %d", ip_str, len(attempts))
 
 
+async def record_failure_unless_trusted(
+    ip_address: str | IPv4Address | IPv6Address, request_headers: dict[str, str]
+) -> None:
+    """Record a blacklist failure unless the request is authenticated with a valid harp-shared-key.
+
+    Requests from Nextcloud/AppAPI carry `harp-shared-key` matching `SHARED_KEY`; a misconfiguration
+    on that trusted path (e.g. reverse-proxy stripping `/exapps/`) would otherwise cause the caller
+    to self-DoS once the blacklist window fills up.
+    """
+    if request_headers.get("harp-shared-key") == SHARED_KEY:
+        return
+    await record_ip_failure(ip_address)
+
+
 async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
     """Return True if IP has exceeded the maximum allowed failures in the request window."""
     ip_str = str(ip_address)
@@ -375,7 +389,7 @@ async def exapps_msg(
     match = APPID_PATTERN.search(path)
     if not match:
         LOGGER.error("Invalid request path, cannot find AppID: %s", path)
-        await record_ip_failure(client_ip_str)
+        await record_failure_unless_trusted(client_ip_str, request_headers)
         return reply.set_txn_var("not_found", 1)
     exapp_id = match.group(1)
     exapp_id_lower = exapp_id.lower()
@@ -424,7 +438,7 @@ async def exapps_msg(
             exapp_record = await _get_or_fetch_exapp(exapp_id_lower)
             if not exapp_record:
                 LOGGER.error("No such ExApp enabled: %s", exapp_id)
-                await record_ip_failure(client_ip_str)
+                await record_failure_unless_trusted(client_ip_str, request_headers)
                 return reply.set_txn_var("not_found", 1)
         except ValidationError as e:
             LOGGER.error("Invalid ExApp metadata from Nextcloud: %s", e)
