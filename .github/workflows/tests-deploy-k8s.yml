@@ -179,6 +179,11 @@ jobs:
           K8S_EXPOSE_TYPE: nodeport
         run: python3 apps/app_api/tests/test_occ_commands_k8s.py
 
+      - name: Verify HaRP routing across enable lifecycle (NodePort)
+        env:
+          K8S_EXPOSE_TYPE: nodeport
+        run: pip install --quiet requests && python3 harp/tests/test_k8s_routing.py
+
       - name: Collect HaRP logs
         if: always()
         run: docker logs appapi-harp > harp.log 2>&1

@@ -720,10 +720,19 @@ async def add_exapp(request: web.Request):
     data = await request.json()
     app_id = request.match_info["app_id"].lower()
     try:
-        EXAPP_CACHE[app_id] = ExApp.model_validate(data)
-        _EXAPP_NEGATIVE_CACHE.pop(app_id, None)
+        exapp_record = ExApp.model_validate(data)
     except ValidationError:
         raise web.HTTPBadRequest() from None
+
+    # AppAPI sends the logical host (the appId). For K8s it must be replaced with
+    # the real upstream or SPOA would NXDOMAIN. Mirror _fetch_exapp_record's cache-miss path.
+    k8s_upstream = await _k8s_resolve_exapp_upstream(app_id)
+    if k8s_upstream:
+        exapp_record.host, exapp_record.port = k8s_upstream
+        exapp_record.resolved_host = ""
+
+    EXAPP_CACHE[app_id] = exapp_record
+    _EXAPP_NEGATIVE_CACHE.pop(app_id, None)
     return web.HTTPNoContent()
 
 

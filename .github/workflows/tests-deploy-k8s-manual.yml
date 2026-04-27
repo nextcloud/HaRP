@@ -181,6 +181,12 @@ jobs:
           MANUAL_CLUSTER_IP: ${{ env.MANUAL_CLUSTER_IP }}
         run: python3 apps/app_api/tests/test_occ_commands_k8s.py
 
+      - name: Verify HaRP routing across enable lifecycle (manual)
+        env:
+          K8S_EXPOSE_TYPE: manual
+          MANUAL_CLUSTER_IP: ${{ env.MANUAL_CLUSTER_IP }}
+        run: pip install --quiet requests && python3 harp/tests/test_k8s_routing.py
+
       - name: Collect HaRP logs
         if: always()
         run: docker logs appapi-harp > harp.log 2>&1
