@@ -16,6 +16,10 @@ lint.extend-per-file-ignores."development/**/*.py" = [
   "D",
   "S",
 ]
+lint.extend-per-file-ignores."tests/**/*.py" = [
+  "D",
+  "S",
+]
 
 [tool.isort]
 profile = "black"
