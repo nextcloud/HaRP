@@ -115,7 +115,7 @@ server {
     server_name nextcloud.com;
 
     location /exapps/ {
-        proxy_pass http://127.0.0.1:8780;
+        proxy_pass http://127.0.0.1:8780/exapps/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -515,13 +515,13 @@ docker run \
 4. Create folder `dev` at the root of repository, extract there content of the desired archive with the [FRP](https://github.com/fatedier/frp/releases/latest) archive which is located at `exapps_dev` folder of this repo.
 5. Edit the `data/nginx/vhost.d/nextcloud.local_location` file from the `nextcloud-docker-dev` to point `/exapps/` web route to the host:
     ```
-    proxy_pass http://172.17.0.1:8780;
+    proxy_pass http://172.17.0.1:8780/exapps/;
     ```
 
     > **Note:** my original content from my dev machine of file `nextcloud.local_location`:
     > ```nginx
     > location /exapps/ {
-    >   proxy_pass http://172.17.0.1:8780;
+    >   proxy_pass http://172.17.0.1:8780/exapps/;
     > }
     > ```
 6. Use `docker compose up -d --force-recreate proxy` command from Julius `nextcloud-docker-dev` to recreate the proxy container.
