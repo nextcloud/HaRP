@@ -20,6 +20,7 @@ from base64 import b64encode
 from enum import IntEnum
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from typing import Any, Literal, Self
+from urllib.parse import quote
 
 import aiohttp
 from aiohttp import web
@@ -235,6 +236,14 @@ class ExposeExAppPayload(ExAppName):
         if self.expose_type == "manual" and not self.upstream_host:
             raise ValueError("upstream_host is required when expose_type='manual'")
         return self
+
+
+class RemoveImagePayload(BaseModel):
+    image_ref: str = Field(
+        ...,
+        min_length=1,
+        description="Docker image reference to remove (repo:tag, repo@digest, or image ID).",
+    )
 
 
 ###############################################################################
@@ -822,7 +831,16 @@ async def docker_exapp_exists(request: web.Request):
             async with session.get(docker_api_url) as resp:
                 if resp.status == 200:
                     LOGGER.info("Container '%s' exists.", container_name)
-                    return web.json_response({"exists": True})
+                    # Surface the image reference the container was created from. AppAPI uses
+                    # this for image cleanup so it knows which ref to delete after the container
+                    # is gone, without having to track image refs in its own state.
+                    image_ref = ""
+                    try:
+                        data = await resp.json()
+                        image_ref = (data.get("Config") or {}).get("Image") or data.get("Image") or ""
+                    except (json.JSONDecodeError, aiohttp.ContentTypeError) as e:
+                        LOGGER.warning("Container '%s' exists but inspect body was not parseable: %s", container_name, e)
+                    return web.json_response({"exists": True, "image_ref": image_ref})
                 if resp.status == 404:
                     LOGGER.info("Container '%s' does not exist.", container_name)
                     return web.json_response({"exists": False})
@@ -1444,6 +1462,138 @@ async def docker_exapp_remove(request: web.Request):
         payload.remove_data,
     )
     return web.HTTPNoContent()
+
+
+async def docker_exapp_image_remove(request: web.Request):
+    """Remove a Docker image by reference, returning a structured result.
+
+    Response shape:
+        {"deleted": true,  "bytes_freed": <int>}                       # image deleted
+        {"deleted": true,  "bytes_freed": 0, "reason": "not_found"}    # image already gone
+        {"deleted": false, "reason": "in_use"}                         # Docker refused (409)
+
+    Bytes_freed is best-effort: we inspect the image first to capture its size, but
+    if the inspect fails for any reason other than 404 we still try the delete and
+    just report bytes_freed=0.
+    """
+    docker_engine_port = get_docker_engine_port(request)
+    try:
+        payload_dict = await request.json()
+    except json.JSONDecodeError:
+        LOGGER.warning("Invalid JSON body received for /docker/exapp/image_remove")
+        raise web.HTTPBadRequest(text="Invalid JSON body") from None
+    try:
+        payload = RemoveImagePayload.model_validate(payload_dict)
+    except ValidationError as e:
+        LOGGER.warning("Payload validation error for /docker/exapp/image_remove: %s", e)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+
+    image_ref = payload.image_ref
+    encoded_ref = quote(image_ref, safe="")
+    inspect_url = f"http://{DOCKER_API_HOST}:{docker_engine_port}/images/{encoded_ref}/json"
+    delete_url = f"http://{DOCKER_API_HOST}:{docker_engine_port}/images/{encoded_ref}"
+
+    bytes_freed = 0
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30.0)) as session:
+        try:
+            async with session.get(inspect_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    bytes_freed = int(data.get("Size", 0))
+                elif resp.status == 404:
+                    LOGGER.info("Image '%s' not found at inspect, treating as already removed.", image_ref)
+                    return web.json_response({"deleted": True, "bytes_freed": 0, "reason": "not_found"})
+                else:
+                    error_text = await resp.text()
+                    LOGGER.warning(
+                        "Image inspect for '%s' returned status %s: %s. Continuing to delete with bytes_freed=0.",
+                        image_ref,
+                        resp.status,
+                        error_text,
+                    )
+        except aiohttp.ClientConnectorError as e:
+            LOGGER.error(
+                "Could not connect to Docker Engine at %s:%s for image inspect: %s",
+                DOCKER_API_HOST,
+                docker_engine_port,
+                e,
+            )
+            raise web.HTTPServiceUnavailable(
+                text=f"Could not connect to Docker Engine on port {docker_engine_port}"
+            ) from e
+        except TimeoutError as e:
+            LOGGER.error(
+                "Timeout inspecting image '%s' via Docker Engine at %s:%s",
+                image_ref,
+                DOCKER_API_HOST,
+                docker_engine_port,
+            )
+            raise web.HTTPGatewayTimeout(text="Timeout communicating with Docker Engine for image inspect") from e
+        except Exception as e:
+            LOGGER.warning(
+                "Unable to inspect image '%s' before removal: %s. Continuing with bytes_freed=0.",
+                image_ref,
+                e,
+            )
+
+        try:
+            async with session.delete(delete_url) as resp:
+                if resp.status == 200:
+                    try:
+                        ops = await resp.json()
+                    except (json.JSONDecodeError, aiohttp.ContentTypeError):
+                        ops = []
+                    actually_deleted = isinstance(ops, list) and any(
+                        isinstance(op, dict) and "Deleted" in op for op in ops
+                    )
+                    actual_bytes_freed = bytes_freed if actually_deleted else 0
+                    LOGGER.info(
+                        "Image '%s' removed (deleted=%s, bytes_freed=%d).",
+                        image_ref,
+                        actually_deleted,
+                        actual_bytes_freed,
+                    )
+                    return web.json_response({"deleted": True, "bytes_freed": actual_bytes_freed})
+                if resp.status == 404:
+                    LOGGER.info("Image '%s' already gone at delete time.", image_ref)
+                    return web.json_response({"deleted": True, "bytes_freed": 0, "reason": "not_found"})
+                if resp.status == 409:
+                    error_text = await resp.text()
+                    LOGGER.info("Image '%s' is in use, skipping removal: %s", image_ref, error_text)
+                    return web.json_response({"deleted": False, "reason": "in_use"})
+                error_text = await resp.text()
+                LOGGER.error(
+                    "Error removing image '%s' via Docker API (status %s): %s",
+                    image_ref,
+                    resp.status,
+                    error_text,
+                )
+                raise web.HTTPServiceUnavailable(
+                    text=f"Error removing image '{image_ref}' via Docker Engine: Status {resp.status}"
+                )
+        except aiohttp.ClientConnectorError as e:
+            LOGGER.error(
+                "Could not connect to Docker Engine at %s:%s to remove image: %s",
+                DOCKER_API_HOST,
+                docker_engine_port,
+                e,
+            )
+            raise web.HTTPServiceUnavailable(
+                text=f"Could not connect to Docker Engine on port {docker_engine_port}"
+            ) from e
+        except TimeoutError as e:
+            LOGGER.error(
+                "Timeout removing image '%s' via Docker Engine at %s:%s",
+                image_ref,
+                DOCKER_API_HOST,
+                docker_engine_port,
+            )
+            raise web.HTTPGatewayTimeout(text="Timeout communicating with Docker Engine for image removal") from e
+        except web.HTTPServiceUnavailable:
+            raise
+        except Exception as e:
+            LOGGER.exception("Unexpected error while removing image '%s' via Docker API.", image_ref)
+            raise web.HTTPInternalServerError(text="An unexpected error occurred during image removal.") from e
 
 
 async def docker_exapp_install_certificates(request: web.Request):
@@ -2985,6 +3135,7 @@ def create_web_app() -> web.Application:
     app.router.add_post("/docker/exapp/stop", docker_exapp_stop)
     app.router.add_post("/docker/exapp/wait_for_start", docker_exapp_wait_for_start)
     app.router.add_post("/docker/exapp/remove", docker_exapp_remove)
+    app.router.add_post("/docker/exapp/image_remove", docker_exapp_image_remove)
     app.router.add_post("/docker/exapp/install_certificates", docker_exapp_install_certificates)
 
     # Kubernetes APIs wrappers
