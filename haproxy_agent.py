@@ -1539,8 +1539,21 @@ async def docker_exapp_image_remove(request: web.Request):
         try:
             async with session.delete(delete_url) as resp:
                 if resp.status == 200:
-                    LOGGER.info("Image '%s' removed (%d bytes freed).", image_ref, bytes_freed)
-                    return web.json_response({"deleted": True, "bytes_freed": bytes_freed})
+                    try:
+                        ops = await resp.json()
+                    except (json.JSONDecodeError, aiohttp.ContentTypeError):
+                        ops = []
+                    actually_deleted = isinstance(ops, list) and any(
+                        isinstance(op, dict) and "Deleted" in op for op in ops
+                    )
+                    actual_bytes_freed = bytes_freed if actually_deleted else 0
+                    LOGGER.info(
+                        "Image '%s' removed (deleted=%s, bytes_freed=%d).",
+                        image_ref,
+                        actually_deleted,
+                        actual_bytes_freed,
+                    )
+                    return web.json_response({"deleted": True, "bytes_freed": actual_bytes_freed})
                 if resp.status == 404:
                     LOGGER.info("Image '%s' already gone at delete time.", image_ref)
                     return web.json_response({"deleted": True, "bytes_freed": 0, "reason": "not_found"})
