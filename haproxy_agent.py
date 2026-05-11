@@ -728,7 +728,7 @@ async def get_info(request: web.Request):
             k8s_status["reachable"] = False
 
     return web.json_response({
-        "version": 0.3,
+        "version": 0.4,
         "docker": True,
         "kubernetes": k8s_status,
     })
