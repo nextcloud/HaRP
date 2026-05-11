@@ -123,6 +123,19 @@ if [ "$NON_ASCII_COUNT" -gt 0 ]; then
     exit 1
 fi
 
+# Reject characters that break the generated FRP TOML config or get mangled by
+# strip_quotes:
+#   "  - terminates the TOML basic string used for metadatas.token
+#   \  - starts a TOML escape sequence inside that string
+#   '  - silently stripped from the end of the value by strip_quotes() below
+FORBIDDEN_COUNT=$(printf '%s' "$HP_SHARED_KEY" | LC_ALL=C tr -cd "\"\\\\'" | wc -c)
+if [ "$FORBIDDEN_COUNT" -gt 0 ]; then
+    echo "ERROR: HP_SHARED_KEY contains a forbidden character."
+    echo "The following characters are not allowed: double quote (\"), single quote ('), backslash (\\)."
+    echo "Please choose a password without these characters."
+    exit 1
+fi
+
 # Strip surrounding quotes if user accidentally included them in env vars
 HP_SHARED_KEY="$(strip_quotes "$HP_SHARED_KEY")"
 export HP_SHARED_KEY
