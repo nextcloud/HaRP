@@ -29,6 +29,9 @@ from haproxyspoa.spoa_server import SpoaServer
 from pydantic import BaseModel, Field, ValidationError, computed_field, model_validator
 
 APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
+# Matches `..` path segments in any literal/encoded form: separators can be `/` or %2F,
+# the dots themselves can be `.` or %2E (any case combination, e.g. `..`, `%2e.`, `%2E%2e`).
+DOT_DOT_SEGMENT_PATTERN = re.compile(r"(?:^|/|%2[fF])(?:\.|%2[eE]){2}(?:/|%2[fF]|$)")
 SHARED_KEY = os.environ.get("HP_SHARED_KEY")
 NC_INSTANCE_URL = os.environ.get("NC_INSTANCE_URL")
 SPOA_ADDRESS = os.environ.get("HP_SPOA_ADDRESS", "127.0.0.1:9600")
@@ -393,6 +396,11 @@ async def exapps_msg(
     # Check if the IP is banned based on failed attempts in BLACKLIST_CACHE.
     if await is_ip_banned(client_ip_str):
         LOGGER.warning("IP %s is banned due to excessive failed attempts.", client_ip_str)
+        return reply.set_txn_var("bad_request", 1)
+
+    if DOT_DOT_SEGMENT_PATTERN.search(path):
+        LOGGER.warning("Rejecting path with parent-directory segment: %s (client_ip=%s)", path, client_ip_str)
+        await record_failure_unless_trusted(client_ip_str, request_headers)
         return reply.set_txn_var("bad_request", 1)
 
     match = APPID_PATTERN.search(path)
