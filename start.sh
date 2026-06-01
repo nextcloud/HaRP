@@ -21,6 +21,7 @@ set -e
 #      - CA key and certificate (ca.key, ca.crt)
 #      - Server key, CSR, and certificate (server.key, server.csr, server.crt)
 #      - Client key, CSR, and certificate (client.key, client.csr, client.crt)
+#    The certificates are valid for HP_FRP_CERT_VALIDITY_DAYS days (default 5000) and are not rotated automatically.
 #    We do not generate /certs/cert.pem file, as for HaProxy it is admin task to mount generated cert if needed.
 # ----------------------------------------------------------------------------
 
@@ -199,6 +200,23 @@ if [ "${HP_FRP_DISABLE_TLS}" != "true" ]; then
         log "INFO: /certs/frp directory created."
         log "INFO: Generating self-signed certificates in /certs/frp..."
 
+        # Validity (in days) for the self-signed FRP certificates (CA, server and client). Configurable so
+        # admins who run their own certificate renewal can shorten it. The long default keeps the CA and the
+        # client certificate - both copied to external Docker engines (see README) - valid for the lifetime
+        # of a typical deployment, since HaRP does not rotate them automatically.
+        HP_FRP_CERT_VALIDITY_DAYS="${HP_FRP_CERT_VALIDITY_DAYS:-5000}"
+        case "$HP_FRP_CERT_VALIDITY_DAYS" in
+            ''|*[!0-9]*)
+                echo "ERROR: HP_FRP_CERT_VALIDITY_DAYS must be a positive integer number of days, got '$HP_FRP_CERT_VALIDITY_DAYS'."
+                exit 1
+                ;;
+        esac
+        if [ "$HP_FRP_CERT_VALIDITY_DAYS" -lt 1 ]; then
+            echo "ERROR: HP_FRP_CERT_VALIDITY_DAYS must be a positive integer number of days, got '$HP_FRP_CERT_VALIDITY_DAYS'."
+            exit 1
+        fi
+        log "INFO: FRP certificates will be valid for ${HP_FRP_CERT_VALIDITY_DAYS} days."
+
         # Write OpenSSL configuration for server to /certs/frp/server-openssl.cnf.
         cat > /certs/frp/server-openssl.cnf <<EOF
 [ req ]
@@ -217,7 +235,7 @@ EOF
 
         # Generate CA key and certificate.
         openssl genrsa -out /certs/frp/ca.key 2048
-        openssl req -x509 -new -nodes -key /certs/frp/ca.key -subj "/CN=harp.nc" -days 5000 -out /certs/frp/ca.crt
+        openssl req -x509 -new -nodes -key /certs/frp/ca.key -subj "/CN=harp.nc" -days "$HP_FRP_CERT_VALIDITY_DAYS" -out /certs/frp/ca.crt
 
         # Generate server key and CSR.
         openssl genrsa -out /certs/frp/server.key 2048
@@ -225,7 +243,7 @@ EOF
             -reqexts req_ext -config /certs/frp/server-openssl.cnf -out /certs/frp/server.csr
 
         # Sign the server certificate with the CA.
-        openssl x509 -req -days 365 -sha256 -in /certs/frp/server.csr \
+        openssl x509 -req -days "$HP_FRP_CERT_VALIDITY_DAYS" -sha256 -in /certs/frp/server.csr \
             -CA /certs/frp/ca.crt -CAkey /certs/frp/ca.key -CAcreateserial \
             -extfile /certs/frp/server-openssl.cnf -extensions req_ext -out /certs/frp/server.crt
 
@@ -252,7 +270,7 @@ EOF
         openssl req -new -sha256 -key /certs/frp/client.key -subj "/CN=harp.client.nc" \
             -config /certs/frp/client-openssl.cnf -out /certs/frp/client.csr
 
-        openssl x509 -req -days 365 -sha256 -in /certs/frp/client.csr \
+        openssl x509 -req -days "$HP_FRP_CERT_VALIDITY_DAYS" -sha256 -in /certs/frp/client.csr \
             -CA /certs/frp/ca.crt -CAkey /certs/frp/ca.key -CAcreateserial \
             -extfile /certs/frp/client-openssl.cnf -extensions req_ext -out /certs/frp/client.crt
 
