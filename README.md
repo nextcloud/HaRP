@@ -399,6 +399,14 @@ The FRP client-server connections, i.e. the connection from the above FRP client
   }
 ```
 
+> **Note:** These FRP certificates are valid for `HP_FRP_CERT_VALIDITY_DAYS` days (default `5000`, ~13 years) and are
+> not renewed automatically. The FRP connection uses mutual TLS, so once a certificate expires the tunnel stops
+> working. To renew them, stop HaRP, delete its `/certs/frp` folder, and start HaRP again, then re-copy `client.crt`,
+> `client.key`, and `ca.crt` to each external Docker Engine and restart its `frpc`.
+>
+> ExApps deployed through HaRP embed these certificates at install time, so after regenerating them you must
+> **remove and re-install each ExApp** for it to pick up the new certificates (a restart is not enough).
+
 ## Adapting ExApps to use HaRP
 
 > We strongly recommend starting support for `HaRP` in ExApps from the start of Nextcloud `32`, as the old `DSP` way will be deprecated and marked for removal in Nextcloud `35`.
