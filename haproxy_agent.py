@@ -5,7 +5,6 @@
 
 import asyncio
 import collections
-import contextlib
 import io
 import ipaddress
 import json
@@ -68,6 +67,10 @@ NC_REQ_URL = NC_INSTANCE_URL.removesuffix("/").removesuffix("/index.php")
 EX_APP_URL = f"{NC_REQ_URL}/index.php/apps/app_api/harp/exapp-meta"
 USER_INFO_URL = f"{NC_REQ_URL}/index.php/apps/app_api/harp/user-info"
 EXCLUDE_HEADERS_USER_INFO = {"host", "content-length"}
+
+# Keep total below the SPOE `timeout processing` (30s); aiohttp's default is 5 minutes.
+NC_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=25.0, connect=5.0)
+_nc_session: aiohttp.ClientSession | None = None
 
 SPOA_AGENT = SpoaServer()
 DOCKER_API_HOST = "127.0.0.1"
@@ -387,6 +390,17 @@ async def get_session(pass_cookie: str) -> NcUser | None:
 async def exapps_msg(
     path: str, headers: str, client_ip: ipaddress.IPv4Address | ipaddress.IPv6Address, pass_cookie: str
 ) -> AckPayload:
+    """An exception would kill the SPOA connection; a zero-action ACK hangs the stream until `timeout processing`."""
+    try:
+        return await _exapps_msg(path, headers, client_ip, pass_cookie)
+    except Exception:
+        LOGGER.exception("Unhandled error while processing request to path=%s", path)
+        return AckPayload().set_txn_var("agent_error", 1)
+
+
+async def _exapps_msg(
+    path: str, headers: str, client_ip: ipaddress.IPv4Address | ipaddress.IPv6Address, pass_cookie: str
+) -> AckPayload:
     reply = AckPayload()
     request_headers = parse_headers(headers)
     client_ip_str = str(get_true_client_ip(client_ip, request_headers))
@@ -527,7 +541,7 @@ async def exapps_msg(
             ip_address(exapp_record.host)
             exapp_record.resolved_host = exapp_record.host
         except ValueError:
-            exapp_record.resolved_host = resolve_ip(exapp_record.host)
+            exapp_record.resolved_host = await resolve_ip(exapp_record.host)
         if not exapp_record.resolved_host:
             LOGGER.error("Cannot resolve '%s' to IP address.", exapp_record.host)
             return reply.set_txn_var("not_found", 1)
@@ -542,6 +556,15 @@ async def exapps_msg(
 
 @SPOA_AGENT.handler("exapps_response_status_msg")
 async def exapps_response_status_msg(status: int, client_ip: str, statuses_to_trigger_bp: str) -> AckPayload:
+    """Top-level SPOA entrypoint, see exapps_msg for why it must never raise."""
+    try:
+        return await _exapps_response_status_msg(status, client_ip, statuses_to_trigger_bp)
+    except Exception:
+        LOGGER.exception("Unhandled error while processing a response status message")
+        return AckPayload().set_txn_var("bp_error", 1)
+
+
+async def _exapps_response_status_msg(status: int, client_ip: str, statuses_to_trigger_bp: str) -> AckPayload:
     reply = AckPayload()
     if not statuses_to_trigger_bp:
         return reply.set_txn_var("bp_triggered", 0)
@@ -595,8 +618,31 @@ def parse_headers(headers_str: str) -> dict[str, str]:
     return headers
 
 
+def _get_nc_session() -> aiohttp.ClientSession:
+    """Shared pooled session for Nextcloud requests: bounded connector, NC_HTTP_TIMEOUT applied."""
+    global _nc_session
+    if _nc_session is None or _nc_session.closed:
+        # DummyCookieJar: client cookies are forwarded explicitly per request; the shared
+        # session must never store Set-Cookie responses, or one user's Nextcloud session
+        # cookies would be replayed on other users' requests.
+        _nc_session = aiohttp.ClientSession(
+            timeout=NC_HTTP_TIMEOUT,
+            # limit=100 is the aiohttp default; a tighter cap delays cold-cache re-auth bursts by whole waves.
+            connector=aiohttp.TCPConnector(limit=100),
+            cookie_jar=aiohttp.DummyCookieJar(),
+        )
+    return _nc_session
+
+
+async def _close_nc_session(_app: web.Application = None) -> None:
+    global _nc_session
+    if _nc_session is not None and not _nc_session.closed:
+        await _nc_session.close()
+        _nc_session = None
+
+
 async def nc_get_exapp(app_id: str) -> ExApp | None:
-    async with aiohttp.ClientSession() as session, session.get(
+    async with _get_nc_session().get(
         EX_APP_URL, headers={"harp-shared-key": SHARED_KEY}, params={"appId": app_id}
     ) as resp:
         if not resp.ok:
@@ -691,7 +737,7 @@ async def _get_or_fetch_exapp(exapp_id: str) -> ExApp | None:
 async def nc_get_user(app_id: str, all_headers: dict[str, str]) -> NcUser | None:
     ext_headers = {k: v for k, v in all_headers.items() if k.lower() not in EXCLUDE_HEADERS_USER_INFO}
     LOGGER.debug("all_headers = %s\next_headers = %s", str(all_headers), str(ext_headers))
-    async with aiohttp.ClientSession() as session, session.get(
+    async with _get_nc_session().get(
         USER_INFO_URL,
         headers={**ext_headers, "harp-shared-key": SHARED_KEY},
         params={"appId": app_id},
@@ -706,22 +752,32 @@ async def nc_get_user(app_id: str, all_headers: dict[str, str]) -> NcUser | None
         return NcUser.model_validate(data)
 
 
-def resolve_ip(hostname: str) -> str:
-    with contextlib.suppress(socket.gaierror):
-        addr_info = socket.getaddrinfo(hostname, None)
-        for family, _, _, _, sockaddr in addr_info:
-            if family == socket.AF_INET:  # IPv4
-                return sockaddr[0]
-        # If no IPv4, return first IPv6
-        for family, _, _, _, sockaddr in addr_info:
-            if family == socket.AF_INET6:  # IPv6
-                return sockaddr[0]
+async def resolve_ip(hostname: str) -> str:
+    # Blocking getaddrinfo here would freeze the whole event loop; resolve in the executor, time-capped.
+    loop = asyncio.get_running_loop()
+    try:
+        # 10s cap: enough for one full resolver retry cycle, far below the 30s SPOE budget.
+        addr_info = await asyncio.wait_for(loop.getaddrinfo(hostname, None), timeout=10.0)
+    except (socket.gaierror, TimeoutError):
+        return ""
+    for family, _, _, _, sockaddr in addr_info:
+        if family == socket.AF_INET:  # IPv4
+            return sockaddr[0]
+    # If no IPv4, return first IPv6
+    for family, _, _, _, sockaddr in addr_info:
+        if family == socket.AF_INET6:  # IPv6
+            return sockaddr[0]
     return ""
 
 
 ###############################################################################
 # Misc routes
 ###############################################################################
+
+
+async def get_heartbeat(request: web.Request):
+    """Liveness probe for healthcheck.sh and the start.sh watchdog; unlike /info it does no network I/O."""
+    return web.json_response({"status": "ok"})
 
 
 async def get_info(request: web.Request):
@@ -3127,6 +3183,7 @@ async def k8s_exapp_expose(request: web.Request):
 def create_web_app() -> web.Application:
     app = web.Application()
 
+    app.router.add_get("/heartbeat", get_heartbeat)
     app.router.add_get("/info", get_info)
 
     # ExApp routes
@@ -3156,6 +3213,7 @@ def create_web_app() -> web.Application:
     app.router.add_post("/k8s/exapp/install_certificates", k8s_exapp_install_certificates)
     app.router.add_post("/k8s/exapp/expose", k8s_exapp_expose)
     app.on_shutdown.append(_close_k8s_session)
+    app.on_shutdown.append(_close_nc_session)
     return app
 
 
@@ -3175,12 +3233,27 @@ async def run_http_server(host="127.0.0.1", port=8200):
 ###############################################################################
 
 
+async def _loop_lag_monitor():
+    """Log when the event loop was blocked: everything in this process shares it, so a stall is a full outage."""
+    interval = 1.0
+    loop = asyncio.get_running_loop()
+    expected = loop.time() + interval
+    while True:
+        await asyncio.sleep(max(0.0, expected - loop.time()))
+        now = loop.time()
+        lag = now - expected
+        if lag > 1.0:
+            LOGGER.warning("Event loop was unresponsive for %.1f seconds", lag)
+        expected = now + interval
+
+
 async def main():
     spoa_task = asyncio.create_task(SPOA_AGENT._run(host=SPOA_HOST, port=SPOA_PORT))  # noqa
     http_task = asyncio.create_task(run_http_server(host="127.0.0.1", port=8200))
+    lag_task = asyncio.create_task(_loop_lag_monitor())
 
     LOGGER.info("Starting both servers: SPOA on %s:%d, HTTP on 127.0.0.1:8200", SPOA_HOST, SPOA_PORT)
-    await asyncio.gather(spoa_task, http_task)
+    await asyncio.gather(spoa_task, http_task, lag_task)
 
 
 if __name__ == "__main__":
