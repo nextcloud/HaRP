@@ -238,6 +238,7 @@ HaRP is configured via several environment variables. Here are the key variables
   - **Description:** A comma-separated list of trusted reverse proxy IP addresses or CIDR ranges. When HaRP is behind another reverse proxy (like NGINX), set this to the IP of that proxy to allow HaRP to correctly identify the true client IP from `X-Forwarded-For` or `X-Real-IP` headers.
   - **Default:** `""` (disabled)
   - **Example:** `"172.18.0.0/16,127.0.0.1"`
+  - **Note:** Quote characters that end up inside the value (this happens with `--env-file` files and compose `environment:` list entries) are stripped automatically. A range with host bits set, e.g. `192.168.100.20/24`, is interpreted as its network (`192.168.100.0/24`), the same way Nextcloud handles `trusted_proxies`. Entries that still fail to parse are ignored individually and logged.
 
 - **`HP_FRP_ADDRESS`**
   - **Description:** IP:Port for the FRP (TCP) frontends.
