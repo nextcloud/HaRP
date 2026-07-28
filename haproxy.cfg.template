@@ -42,6 +42,7 @@ frontend ex_apps
     http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.exapps.unauthorized) -m int eq 1 }
     http-request return status 403 content-type text/plain string "403 Forbidden" if { var(txn.exapps.forbidden) -m int eq 1 }
     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
+    http-request return status 503 content-type text/plain string "503 Service Unavailable (HaRP)" if !{ var(txn.exapps.backend) -m found }
     use_backend %[var(txn.exapps.backend)]
 
 ###############################################################################
@@ -56,6 +57,7 @@ _HTTPS_FRONTEND_     http-request silent-drop if { var(txn.exapps.bad_request) -
 _HTTPS_FRONTEND_     http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.exapps.unauthorized) -m int eq 1 }
 _HTTPS_FRONTEND_     http-request return status 403 content-type text/plain string "403 Forbidden" if { var(txn.exapps.forbidden) -m int eq 1 }
 _HTTPS_FRONTEND_     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
+_HTTPS_FRONTEND_     http-request return status 503 content-type text/plain string "503 Service Unavailable (HaRP)" if !{ var(txn.exapps.backend) -m found }
 _HTTPS_FRONTEND_     use_backend %[var(txn.exapps.backend)]
 
 ###############################################################################
@@ -119,5 +121,8 @@ backend agents
     mode tcp
     timeout connect 5s
     timeout server  3m
+    # Tolerate short agent stalls: a check fails only after 10s without a SPOP HELLO
+    # reply, DOWN only after 5 consecutive failures.
+    timeout check 10s
     option spop-check
-    server agent1 ${HP_SPOA_ADDRESS} check
+    server agent1 ${HP_SPOA_ADDRESS} check inter 2s fall 5 rise 2

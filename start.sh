@@ -1,6 +1,7 @@
-#!/bin/sh
+#!/bin/bash
 # SPDX-FileCopyrightText: 2025 Nextcloud GmbH and Nextcloud contributors
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# bash (not sh): process supervision at the bottom relies on `wait -n`.
 
 set -e
 
@@ -29,6 +30,16 @@ HP_WAIT_AGENT_HTTP=${HP_WAIT_AGENT_HTTP:-60}
 HP_WAIT_SPOA=${HP_WAIT_SPOA:-60}
 HP_WAIT_FRP=${HP_WAIT_FRP:-30}
 HP_WAIT_INTERVAL=${HP_WAIT_INTERVAL:-0.5}
+
+# Watchdog: after roughly HP_WATCHDOG_FAILS x (HP_WATCHDOG_INTERVAL + curl's 5s timeout)
+# seconds without /heartbeat the agent is killed and the container exits so the Docker
+# restart policy revives it.
+HP_WATCHDOG_ENABLED=${HP_WATCHDOG_ENABLED:-true}
+HP_WATCHDOG_INTERVAL=${HP_WATCHDOG_INTERVAL:-10}
+HP_WATCHDOG_FAILS=${HP_WATCHDOG_FAILS:-12}
+# Non-numeric or zero values would turn the watchdog into a busy loop (a failing `sleep` retries instantly).
+[ "$HP_WATCHDOG_INTERVAL" -ge 1 ] 2>/dev/null || { echo "WARNING: invalid HP_WATCHDOG_INTERVAL '${HP_WATCHDOG_INTERVAL}', using 10."; HP_WATCHDOG_INTERVAL=10; }
+[ "$HP_WATCHDOG_FAILS" -ge 1 ] 2>/dev/null || { echo "WARNING: invalid HP_WATCHDOG_FAILS '${HP_WATCHDOG_FAILS}', using 12."; HP_WATCHDOG_FAILS=12; }
 
 HP_VERBOSE_START=${HP_VERBOSE_START:-1}
 log() {
@@ -81,7 +92,8 @@ wait_for_http() {
     url="$1"; timeout="${2:-60}"; interval="${3:-0.5}"
     start_ts="$(date +%s)"
     while :; do
-        if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+        # --noproxy: internal loopback probes must ignore any http_proxy environment.
+        if curl -fsS --noproxy '*' --max-time 2 "$url" >/dev/null 2>&1; then
             return 0
         fi
         now="$(date +%s)"; elapsed=$(( now - start_ts ))
@@ -92,6 +104,30 @@ wait_for_http() {
         sleep "$interval"
     done
 }
+
+# shellcheck disable=SC2329  # invoked via trap
+_shutdown() {
+    trap - TERM INT USR1
+    set +e  # may fire while `set -e` is still active during startup
+    log "INFO: Stop signal received, shutting down HaRP processes..."
+    [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
+    # Unquoted expansions: still-unset PIDs simply disappear from the argument list.
+    # shellcheck disable=SC2086
+    kill -TERM ${HAPROXY_PID:-} ${AGENT_PID:-} ${FRPS_PID:-} ${FRPC_PID:-} 2>/dev/null
+    wait
+    exit 0
+}
+# Install the stop handler before doing anything slow (certificate generation, service
+# startup waits), so a `docker stop` during startup exits cleanly instead of hitting
+# Docker's 10s SIGKILL: the kernel drops default-disposition signals for PID 1.
+# USR1 too: it was the image's stop signal while haproxy was PID 1, so honor it as well.
+trap _shutdown TERM INT USR1
+
+# Forward SIGHUP to the HAProxy master for a live config/certificate reload, matching
+# the behavior when HAProxy was PID 1. The `|| true` matters: before HAProxy is started
+# the kill fails, and a failing trap command under the startup `set -e` would abort PID 1.
+# shellcheck disable=SC2086
+trap 'kill -HUP ${HAPROXY_PID:-} 2>/dev/null || true' HUP
 
 # ----------------------------------------------------------------------------
 # Resolve HP_SHARED_KEY once for the whole process (env or file)
@@ -427,17 +463,20 @@ EOF
 fi
 
 log "INFO: Starting Python HaProxy Agent on 127.0.0.1:8200 and ${HP_SPOA_ADDRESS}..."
-nohup python3 /usr/local/bin/haproxy_agent.py &
+python3 /usr/local/bin/haproxy_agent.py &
+AGENT_PID=$!
 
-# Wait deterministically for the agent to be ready (HTTP) and for SPOA (TCP)
-log "INFO: Waiting for HaRP Agent HTTP (GET http://127.0.0.1:8200/info) to be ready..."
-wait_for_http "http://127.0.0.1:8200/info" "$HP_WAIT_AGENT_HTTP" "$HP_WAIT_INTERVAL"
+# Wait deterministically for the agent to be ready (HTTP) and for SPOA (TCP).
+# Probe /heartbeat, not /info: /info can block on a K8s API reachability check.
+log "INFO: Waiting for HaRP Agent HTTP (GET http://127.0.0.1:8200/heartbeat) to be ready..."
+wait_for_http "http://127.0.0.1:8200/heartbeat" "$HP_WAIT_AGENT_HTTP" "$HP_WAIT_INTERVAL"
 
 log "INFO: Waiting for SPOA port ${HP_SPOA_ADDRESS}..."
 wait_for_tcp "$SPOA_HOST" "$SPOA_PORT" "$HP_WAIT_SPOA" "$HP_WAIT_INTERVAL"
 
 log "INFO: Starting FRP server on ${HP_FRP_ADDRESS}..."
 frps -c "${CFG_DIR}/frps.toml" &
+FRPS_PID=$!
 
 # Wait for FRP port to be listening before starting frpc
 LOCAL_FRP_HOST="$FRP_HOST"
@@ -445,10 +484,59 @@ LOCAL_FRP_HOST="$FRP_HOST"
 log "INFO: Waiting for FRP server port ${LOCAL_FRP_HOST}:${FRP_PORT}..."
 wait_for_tcp "$LOCAL_FRP_HOST" "$FRP_PORT" "$HP_WAIT_FRP" "$HP_WAIT_INTERVAL"
 
+FRPC_PID=""
 if [ -e "/var/run/docker.sock" ]; then
   log "INFO: Starting FRP client for Docker Engine..."
   frpc -c "${CFG_DIR}/frpc-docker.toml" &
+  FRPC_PID=$!
 fi
 
 log "INFO: Starting HAProxy..."
-exec haproxy -f "${CFG_DIR}/haproxy.cfg" -W -db
+haproxy -f "${CFG_DIR}/haproxy.cfg" -W -db &
+HAPROXY_PID=$!
+
+# ----------------------------------------------------------------------------
+# Supervision: the death of any critical process stops the container so the
+# Docker restart policy (--restart unless-stopped) can revive it.
+# ----------------------------------------------------------------------------
+set +e
+
+WATCHDOG_PID=""
+if [ "$HP_WATCHDOG_ENABLED" = "true" ]; then
+    (
+        fails=0
+        while :; do
+            sleep "$HP_WATCHDOG_INTERVAL"
+            if curl -fsS --noproxy '*' --max-time 5 http://127.0.0.1:8200/heartbeat >/dev/null 2>&1; then
+                fails=0
+            else
+                fails=$((fails + 1))
+                echo "WARNING: HaRP agent heartbeat failed (${fails}/${HP_WATCHDOG_FAILS})."
+                if [ "$fails" -ge "$HP_WATCHDOG_FAILS" ]; then
+                    echo "ERROR: HaRP agent is unresponsive, killing it so the container gets restarted."
+                    kill -TERM "$AGENT_PID" 2>/dev/null
+                    sleep 5
+                    kill -9 "$AGENT_PID" 2>/dev/null
+                    exit 1
+                fi
+            fi
+        done
+    ) &
+    WATCHDOG_PID=$!
+fi
+
+# A trapped signal (e.g. the HUP reload above) interrupts `wait -n` with status > 128,
+# so keep waiting until one of the supervised processes is actually gone.
+dead=""
+while [ -z "$dead" ]; do
+    wait -n
+    rc=$?
+    for entry in "haproxy:$HAPROXY_PID" "agent:$AGENT_PID" "frps:$FRPS_PID" ${FRPC_PID:+"frpc:$FRPC_PID"} ${WATCHDOG_PID:+"watchdog:$WATCHDOG_PID"}; do
+        kill -0 "${entry#*:}" 2>/dev/null || { dead="${entry%%:*}"; break; }
+    done
+done
+echo "ERROR: HaRP process '${dead}' exited unexpectedly (status ${rc}), stopping the container."
+[ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
+kill -TERM "$HAPROXY_PID" "$AGENT_PID" "$FRPS_PID" ${FRPC_PID:+"$FRPC_PID"} 2>/dev/null
+wait
+exit 1

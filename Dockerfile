@@ -84,6 +84,10 @@ COPY --chmod=664 spoe-agent.conf /etc/haproxy/spoe-agent.conf
 COPY --chmod=755 haproxy_agent.py /usr/local/bin/haproxy_agent.py
 
 ENTRYPOINT ["start.sh"]
+# The haproxy base image sets STOPSIGNAL SIGUSR1 (graceful stop for haproxy as PID 1).
+# PID 1 is now the supervising start.sh, and the kernel drops default-disposition
+# signals for PID 1, so USR1 would be ignored and `docker stop` would end in SIGKILL.
+STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=10s --timeout=10s --retries=9 CMD /healthcheck.sh
 
 LABEL com.centurylinklabs.watchtower.enable="false"

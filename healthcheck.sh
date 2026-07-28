@@ -27,9 +27,10 @@ if ! command -v nc >/dev/null 2>&1; then
   exit 1
 fi
 
-# 2) Check SPOE Agent Control API (Python HTTP) on 127.0.0.1:8200
-if ! nc -z 127.0.0.1 8200; then
-  echo "ERROR: Data Plane API not responding on 127.0.0.1:8200"
+# 2) Check the agent answers HTTP on 127.0.0.1:8200: a wedged agent still accepts TCP,
+#    so `nc -z` cannot detect it. The SPOA listener shares the same event loop.
+if ! curl -fsS --noproxy '*' --max-time 5 http://127.0.0.1:8200/heartbeat >/dev/null 2>&1; then
+  echo "ERROR: HaRP agent is not responding on 127.0.0.1:8200"
   exit 1
 fi
 

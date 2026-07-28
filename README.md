@@ -267,6 +267,11 @@ HaRP is configured via several environment variables. Here are the key variables
   - **Default:** `warning`
   - **Possible Values:** `debug`, `info`, `warning`, `error`
 
+- **`HP_WATCHDOG_ENABLED`** / **`HP_WATCHDOG_INTERVAL`** / **`HP_WATCHDOG_FAILS`**
+  - **Description:** Self-healing watchdog. Every `HP_WATCHDOG_INTERVAL` seconds the container probes the internal agent (`GET /heartbeat`); after `HP_WATCHDOG_FAILS` consecutive failures the agent is killed and the container exits so that the Docker restart policy (`--restart unless-stopped` in the examples above) brings it back in a clean state. The death of any core process (agent, frps, frpc, HAProxy) also stops the container now instead of leaving it running half-broken.
+  - **Default:** `HP_WATCHDOG_ENABLED="true"`, `HP_WATCHDOG_INTERVAL="10"`, `HP_WATCHDOG_FAILS="12"`. Each failed probe can additionally spend the probe's own 5s timeout, so with the defaults a dead agent is detected in about 2 minutes and a hung-but-connectable one in about 3 minutes.
+  - **Reloading HAProxy:** sending `SIGHUP` reloads the HAProxy configuration and certificates without restarting the container (same as before): `docker exec appapi-harp kill -HUP 1`. Prefer this over `docker kill -s HUP`: after any `docker kill` the Docker daemon treats the container as manually stopped and will not auto-restart it on its next exit until it is started manually again.
+
 - **`HP_VERBOSE_START`**
   - **Description:** Flag that determines whether to output verbose logging to the console during  container startup.
   - **Default:** `1`
