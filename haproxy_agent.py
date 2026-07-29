@@ -27,6 +27,11 @@ from haproxyspoa.payloads.ack import AckPayload
 from haproxyspoa.spoa_server import SpoaServer
 from pydantic import BaseModel, Field, ValidationError, computed_field, model_validator
 
+# Reported by `/info`; AppAPI compares it against its minimum supported HaRP version.
+# Keep it in sync with the release tag and use a full `x.y.z` string: a bare float like `0.4`
+# is read as "0.4.0", which made every release look older than it is.
+HARP_VERSION = "0.4.3"
+
 APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
 # Matches `..` path segments in any literal/encoded form: separators can be `/` or %2F,
 # the dots themselves can be `.` or %2E (any case combination, e.g. `..`, `%2e.`, `%2E%2e`).
@@ -835,7 +840,7 @@ async def get_info(request: web.Request):
             k8s_status["reachable"] = False
 
     return web.json_response({
-        "version": 0.4,
+        "version": HARP_VERSION,
         "docker": True,
         "kubernetes": k8s_status,
     })
