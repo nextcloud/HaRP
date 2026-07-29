@@ -75,23 +75,66 @@ _nc_session: aiohttp.ClientSession | None = None
 SPOA_AGENT = SpoaServer()
 DOCKER_API_HOST = "127.0.0.1"
 
-TRUSTED_PROXIES_STR = os.environ.get("HP_TRUSTED_PROXY_IPS", "")
-TRUSTED_PROXIES = []
-if TRUSTED_PROXIES_STR:
-    try:
-        TRUSTED_PROXIES = [
-            ipaddress.ip_network(proxy.strip()) for proxy in TRUSTED_PROXIES_STR.split(",") if proxy.strip()
-        ]
-        LOGGER.info("Trusting reverse proxies for client IP detection: %s", [str(p) for p in TRUSTED_PROXIES])
-    except ValueError as e:
+
+def _parse_trusted_proxies(value: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    if not value:
+        return []
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    invalid: list[str] = []
+    masked: list[tuple[str, ipaddress.IPv4Network | ipaddress.IPv6Network]] = []
+    dequoted: list[tuple[str, str]] = []
+    for raw_item in value.split(","):
+        # Quotes reach us literally when the variable is set via an env-file or a compose
+        # `environment:` list entry, so strip them before parsing.
+        item = raw_item.strip()
+        stripped = item.strip("'\"\u201c\u201d\u2018\u2019").strip()
+        if not stripped:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(stripped))
+            if stripped != item:
+                dequoted.append((item, stripped))
+            continue
+        except ValueError:
+            pass
+        try:
+            network = ipaddress.ip_network(stripped, strict=False)
+        except ValueError:
+            invalid.append(item)
+            continue
+        if stripped != item:
+            dequoted.append((item, stripped))
+        masked.append((stripped, network))
+        networks.append(network)
+    # The rescues below run before the trust summary; at the default "warning" log level they are
+    # the only boot-time signal that a previously rejected value now enables header-based detection.
+    for item, stripped in dequoted[:5]:
+        LOGGER.warning("HP_TRUSTED_PROXY_IPS: quotes stripped from %r, using %r.", item, stripped)
+    if len(dequoted) > 5:
+        LOGGER.warning("HP_TRUSTED_PROXY_IPS: quotes stripped from %d more entries.", len(dequoted) - 5)
+    # Same leniency as Nextcloud's own `trusted_proxies` handling: mask the host bits.
+    for item, network in masked[:5]:
+        LOGGER.warning("HP_TRUSTED_PROXY_IPS: interpreting %r as %r.", item, str(network))
+    if len(masked) > 5:
+        LOGGER.warning("HP_TRUSTED_PROXY_IPS: %d more entries with host bits set were masked.", len(masked) - 5)
+    for bad in invalid[:5]:
+        LOGGER.error("Invalid entry in HP_TRUSTED_PROXY_IPS ignored: %r is not an IPv4 or IPv6 network.", bad)
+    if len(invalid) > 5:
+        LOGGER.error("HP_TRUSTED_PROXY_IPS: %d more invalid entries ignored.", len(invalid) - 5)
+    if networks:
+        LOGGER.info("Trusting reverse proxies for client IP detection: %s", [str(p) for p in networks])
+    else:
         LOGGER.error(
-            "Invalid value for HP_TRUSTED_PROXY_IPS: %s. Client IP detection from headers is disabled. "
+            "No valid entries in HP_TRUSTED_PROXY_IPS (%r). Client IP detection from headers is disabled. "
             "The X-Forwarded-For and X-Real-IP headers will not be respected. "
             "This can lead to the outer proxy's IP being blocked "
             "during a bruteforce attempt instead of the actual client's IP.",
-            e,
+            value if len(value) <= 200 else value[:200] + "...",
         )
-        TRUSTED_PROXIES = []
+    return networks
+
+
+TRUSTED_PROXIES = _parse_trusted_proxies(os.environ.get("HP_TRUSTED_PROXY_IPS", ""))
 
 ###############################################################################
 # Definitions
