@@ -296,7 +296,7 @@ HaRP is configured via several environment variables. Here are the key variables
     - **Description:** Timeout for server-side connections. Also caps how long an established streaming response (for example an SSE stream) may stay idle. **We do not recommend to change this value.**
     - **Default:** `1800s`
   - **`HP_TIMEOUT_TUNNEL`**
-    - **Description:** Inactivity timeout for upgraded connections (WebSockets). A value of `0` is treated as unlimited (mapped to HAProxy's `24d` maximum), at the cost of vanished peers holding connections open for a very long time.
+    - **Description:** Inactivity timeout for upgraded connections (WebSockets). A value of `0` is treated as unlimited (mapped to HAProxy's `24d` maximum), at the cost of vanished peers holding connections open for a very long time. Unlimited applies only while the connection stays open in both directions: half-closed connections are still reaped after 30 seconds.
     - **Default:** the value of `HP_TIMEOUT_SERVER` (`1800s`)
   - **`HP_BLACKLIST_WINDOW`**
     - **Description:** Timeout after which an IP is removed from the blacklist, in seconds.

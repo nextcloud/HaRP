@@ -47,7 +47,7 @@ HP_WATCHDOG_FAILS=${HP_WATCHDOG_FAILS:-12}
 # mapped to HAProxy's 24d maximum.
 # Exported explicitly: unlike the Dockerfile ENV timeouts it must reach envsubst below.
 HP_TIMEOUT_TUNNEL="${HP_TIMEOUT_TUNNEL:-${HP_TIMEOUT_SERVER:-1800s}}"
-if [[ "$HP_TIMEOUT_TUNNEL" =~ ^0(ms|s|m|h|d)?$ ]]; then
+if [[ "$HP_TIMEOUT_TUNNEL" =~ ^0(us|ms|s|m|h|d)?$ ]]; then
     HP_TIMEOUT_TUNNEL="24d"
 fi
 export HP_TIMEOUT_TUNNEL
