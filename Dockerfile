@@ -23,7 +23,7 @@
 #  - HP_SHARED_KEY or HP_SHARED_KEY_FILE must be provided at runtime.
 # -------------------------------------------------------------------------
 
-FROM docker.io/library/haproxy:3.1.2-alpine3.21
+FROM docker.io/library/haproxy:3.2.22-alpine3.24
 
 USER root
 
@@ -67,7 +67,7 @@ RUN set -ex; \
 
 # Install the Python SPOA library
 RUN pip install --break-system-packages \
-        pydantic==2.10.6 \
+        pydantic==2.13.4 \
         git+https://github.com/cloud-py-api/haproxy-python-spoa.git
 
 # Copy our scripts and templates

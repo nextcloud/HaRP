@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Nextcloud GmbH and Nextcloud contributors
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-FROM haproxy:3.1.2-alpine3.21
+FROM haproxy:3.2.22-alpine3.24
 
 USER root
 
