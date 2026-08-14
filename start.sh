@@ -41,6 +41,17 @@ HP_WATCHDOG_FAILS=${HP_WATCHDOG_FAILS:-12}
 [ "$HP_WATCHDOG_INTERVAL" -ge 1 ] 2>/dev/null || { echo "WARNING: invalid HP_WATCHDOG_INTERVAL '${HP_WATCHDOG_INTERVAL}', using 10."; HP_WATCHDOG_INTERVAL=10; }
 [ "$HP_WATCHDOG_FAILS" -ge 1 ] 2>/dev/null || { echo "WARNING: invalid HP_WATCHDOG_FAILS '${HP_WATCHDOG_FAILS}', using 12."; HP_WATCHDOG_FAILS=12; }
 
+# WebSocket/tunnel idle timeout: defaults to HP_TIMEOUT_SERVER so raising the server
+# timeout covers tunnels as well. "0" means unlimited; HAProxy itself has no infinite
+# value for "timeout tunnel" (a literal 0 falls back to the client timeout), so it is
+# mapped to HAProxy's 24d maximum.
+# Exported explicitly: unlike the Dockerfile ENV timeouts it must reach envsubst below.
+HP_TIMEOUT_TUNNEL="${HP_TIMEOUT_TUNNEL:-${HP_TIMEOUT_SERVER:-1800s}}"
+if [[ "$HP_TIMEOUT_TUNNEL" =~ ^0(us|ms|s|m|h|d)?$ ]]; then
+    HP_TIMEOUT_TUNNEL="24d"
+fi
+export HP_TIMEOUT_TUNNEL
+
 HP_VERBOSE_START=${HP_VERBOSE_START:-1}
 log() {
     if [ "$HP_VERBOSE_START" -eq 1 ]; then

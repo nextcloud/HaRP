@@ -11,6 +11,7 @@
 #   HP_TIMEOUT_CONNECT,
 #   HP_TIMEOUT_CLIENT,
 #   HP_TIMEOUT_SERVER,
+#   HP_TIMEOUT_TUNNEL,
 #
 # If /certs/cert.pem is not found, lines containing "_HTTPS_FRONTEND_" are
 # commented out automatically in start.sh.
@@ -28,6 +29,11 @@ defaults
     timeout connect ${HP_TIMEOUT_CONNECT}
     timeout client ${HP_TIMEOUT_CLIENT}
     timeout server ${HP_TIMEOUT_SERVER}
+    # Idle timeout for upgraded connections (WebSockets); without it idle tunnels
+    # fall back to the much shorter client timeout.
+    timeout tunnel ${HP_TIMEOUT_TUNNEL}
+    # Reap half-closed connections instead of holding them for the whole tunnel timeout.
+    timeout client-fin 30s
 
 
 ###############################################################################
