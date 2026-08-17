@@ -65,10 +65,13 @@ RUN set -ex; \
         netcat-openbsd; \
     chmod -R 777 /tmp;
 
-# Install the Python SPOA library
+# Install the Python SPOA library.
+# Pinned to a commit: the single-write frame emission it contains is required for
+# HAProxy 3.2+, whose SPOP mux resets connections when a frame arrives split
+# across TCP segments. Bump this deliberately together with the library.
 RUN pip install --break-system-packages \
         pydantic==2.13.4 \
-        git+https://github.com/cloud-py-api/haproxy-python-spoa.git
+        git+https://github.com/cloud-py-api/haproxy-python-spoa.git@f00f3f7b1b0f56e10052af6c0d07e81c5195d84d
 
 # Copy our scripts and templates
 COPY --chmod=755 healthcheck.sh /healthcheck.sh
