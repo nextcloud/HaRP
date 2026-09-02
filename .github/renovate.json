@@ -1,10 +1,32 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:base",
+    "config:recommended",
     ":disableDependencyDashboard"
   ],
   "ignorePaths": [
     "**/tests/**"
+  ],
+  "packageRules": [
+    {
+      "description": "Track only HAProxy LTS branches. Upstream ships LTS on even minors (3.0, 3.2, 3.4, ...) with ~5 years of support; odd minors (3.1, 3.3, ...) are non-LTS and go EOL about a year after release. See https://www.haproxy.org/ for branch status.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["docker.io/library/haproxy", "haproxy"],
+      "allowedVersions": "/^\\d+\\.\\d*[02468](\\.\\d+)?(-alpine.*)?$/",
+      "groupName": "haproxy base image"
+    },
+    {
+      "description": "A HAProxy minor bump can change SPOP mux behaviour, which the pinned haproxy-python-spoa commit compensates for. Keep those PRs separate from routine patch bumps so the SPOE agent gets tested against the new branch.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["docker.io/library/haproxy", "haproxy"],
+      "matchUpdateTypes": ["major", "minor"],
+      "groupName": "haproxy LTS branch upgrade",
+      "addLabels": ["needs-spoe-testing"]
+    },
+    {
+      "description": "Group GitHub Actions bumps into a single PR.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    }
   ]
 }

@@ -23,7 +23,7 @@
 #  - HP_SHARED_KEY or HP_SHARED_KEY_FILE must be provided at runtime.
 # -------------------------------------------------------------------------
 
-FROM docker.io/library/haproxy:3.2.22-alpine3.24
+FROM docker.io/library/haproxy:3.4.4-alpine3.24
 
 USER root
 
@@ -67,8 +67,8 @@ RUN set -ex; \
 
 # Install the Python SPOA library.
 # Pinned to a commit: the single-write frame emission it contains is required for
-# HAProxy 3.2+, whose SPOP mux resets connections when a frame arrives split
-# across TCP segments. Bump this deliberately together with the library.
+# HAProxy 3.2+ (we run 3.4 LTS), whose SPOP mux resets connections when a frame
+# arrives split across TCP segments. Bump this deliberately together with the library.
 RUN pip install --break-system-packages \
         pydantic==2.13.4 \
         git+https://github.com/cloud-py-api/haproxy-python-spoa.git@f00f3f7b1b0f56e10052af6c0d07e81c5195d84d
