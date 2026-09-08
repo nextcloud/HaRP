@@ -58,6 +58,9 @@ if not K8S_API_SERVER and os.environ.get("KUBERNETES_SERVICE_HOST"):
     K8S_API_SERVER = f"https://{host}:{port}"
 
 K8S_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60.0)
+# `/info` probes the API server with its own short timeout: AppAPI waits 5 s for `/info` in its daemon checks, so a
+# probe that inherits K8S_HTTP_TIMEOUT makes an unreachable API server look like an unreachable HaRP.
+K8S_PROBE_TIMEOUT = aiohttp.ClientTimeout(total=3.0)
 _k8s_session: aiohttp.ClientSession | None = None
 K8S_NAME_MAX_LENGTH = 63
 # Set up the logging configuration
@@ -829,15 +832,14 @@ async def get_heartbeat(request: web.Request):
 
 
 async def get_info(request: web.Request):
+    """Report HaRP's version and backend status; used by the AppAPI daemon check."""
     k8s_status: dict[str, Any] = {"enabled": K8S_ENABLED}
     if K8S_ENABLED:
         k8s_status["api_server"] = K8S_API_SERVER or ""
-        try:
-            _ensure_k8s_configured()
-            status, _, _ = await _k8s_request("GET", "/api")
-            k8s_status["reachable"] = status == 200
-        except Exception:
-            k8s_status["reachable"] = False
+        reachable, error = await _k8s_probe()
+        k8s_status["reachable"] = reachable
+        if error:
+            k8s_status["error"] = error
 
     return web.json_response({
         "version": HARP_VERSION,
@@ -2270,6 +2272,51 @@ async def _k8s_request(
     except aiohttp.ClientError as e:
         LOGGER.error("Error communicating with Kubernetes API (%s %s): %s", method, url, e)
         raise web.HTTPServiceUnavailable(text="Error communicating with Kubernetes API") from e
+
+
+async def _k8s_probe() -> tuple[bool, str]:
+    """Check whether the Kubernetes API server answers; returns ``(reachable, error)``.
+
+    Used by ``/info`` only. Unlike ``_k8s_request`` it fails fast (K8S_PROBE_TIMEOUT) and keeps the reason, so the
+    AppAPI daemon check can tell a broken cluster connection from a broken HaRP one.
+    """
+    try:
+        _ensure_k8s_configured()
+    except web.HTTPServiceUnavailable as e:
+        return False, e.text or "Kubernetes backend is not configured."
+    url = f"{K8S_API_SERVER}/api"
+    headers = {"Authorization": f"Bearer {_get_k8s_token()}", "Accept": "application/json"}
+    try:
+        session = _get_k8s_session()  # may raise on a broken HP_K8S_CA_FILE
+        async with session.get(url, headers=headers, timeout=K8S_PROBE_TIMEOUT) as resp:
+            # Read the body inside the context, like `_k8s_request` does: it carries the Kubernetes `Status.message`
+            # that says what actually went wrong, and leaving it unread makes aiohttp drop the pooled connection
+            # whenever the body does not arrive with the headers.
+            body = (await resp.text())[:200].strip()
+            if resp.status == 200:
+                return True, ""
+            if resp.status == 401:
+                error = (
+                    "Kubernetes API server answered HTTP 401; check the bearer token "
+                    "(HP_K8S_BEARER_TOKEN or HP_K8S_BEARER_TOKEN_FILE)."
+                )
+            elif resp.status == 403:
+                # 401 is authentication, 403 is authorization: a valid token can still be denied by RBAC.
+                error = "Kubernetes API server answered HTTP 403; check the bearer token's RBAC permissions."
+            else:
+                error = f"Kubernetes API server answered HTTP {resp.status}."
+            if body:
+                error = f"{error} Response: {body}"
+    except TimeoutError:
+        error = f"Kubernetes API server did not answer within {K8S_PROBE_TIMEOUT.total:g}s (DNS, connect or request)."
+    except aiohttp.ClientSSLError as e:
+        error = f"TLS error connecting to the Kubernetes API server: {e}"
+    except aiohttp.ClientError as e:
+        error = f"Cannot connect to the Kubernetes API server: {e}"
+    except Exception as e:  # `/info` must always answer
+        error = f"Kubernetes API probe failed: {e}"
+    LOGGER.warning("Kubernetes API probe (%s) failed: %s", url, error)
+    return False, error
 
 
 def _k8s_parse_env(env_list: list[str]) -> list[dict[str, str]]:
