@@ -832,6 +832,7 @@ async def get_heartbeat(request: web.Request):
 
 
 async def get_info(request: web.Request):
+    """Report HaRP's version and backend status; used by the AppAPI daemon check."""
     k8s_status: dict[str, Any] = {"enabled": K8S_ENABLED}
     if K8S_ENABLED:
         k8s_status["api_server"] = K8S_API_SERVER or ""
@@ -2288,15 +2289,24 @@ async def _k8s_probe() -> tuple[bool, str]:
     try:
         session = _get_k8s_session()  # may raise on a broken HP_K8S_CA_FILE
         async with session.get(url, headers=headers, timeout=K8S_PROBE_TIMEOUT) as resp:
+            # Read the body inside the context, like `_k8s_request` does: it carries the Kubernetes `Status.message`
+            # that says what actually went wrong, and leaving it unread makes aiohttp drop the pooled connection
+            # whenever the body does not arrive with the headers.
+            body = (await resp.text())[:200].strip()
             if resp.status == 200:
                 return True, ""
-            if resp.status in (401, 403):
+            if resp.status == 401:
                 error = (
-                    f"Kubernetes API server answered HTTP {resp.status}; check the bearer token "
+                    "Kubernetes API server answered HTTP 401; check the bearer token "
                     "(HP_K8S_BEARER_TOKEN or HP_K8S_BEARER_TOKEN_FILE)."
                 )
+            elif resp.status == 403:
+                # 401 is authentication, 403 is authorization: a valid token can still be denied by RBAC.
+                error = "Kubernetes API server answered HTTP 403; check the bearer token's RBAC permissions."
             else:
                 error = f"Kubernetes API server answered HTTP {resp.status}."
+            if body:
+                error = f"{error} Response: {body}"
     except TimeoutError:
         error = f"Kubernetes API server did not answer within {K8S_PROBE_TIMEOUT.total:g}s (DNS, connect or request)."
     except aiohttp.ClientSSLError as e:
