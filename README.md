@@ -125,6 +125,20 @@ server {
 }
 ```
 
+If you point `proxy_pass` at a container or DNS name instead of an IP (for example `appapi-harp` on a Docker
+network), do not write the name into `proxy_pass` directly: nginx resolves it once at startup and refuses to
+start whenever that container is absent (`host not found in upstream`), which takes the whole server block down.
+Put the upstream in a variable, which nginx resolves per request, and give it a resolver:
+
+```nginx
+    resolver 127.0.0.11 valid=30s;   # Docker's embedded DNS; use your own resolver outside Docker
+    set $harp_upstream http://appapi-harp:8780;
+    location /exapps/ {
+        proxy_pass $harp_upstream;
+        # the same proxy_set_header and proxy_read_timeout lines as above
+    }
+```
+
 ### Caddy Example
 
 ```caddyfile
