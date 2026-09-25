@@ -5,10 +5,11 @@
 # Redeploy HaRP with Kubernetes backend for local development.
 #
 # Prerequisites:
-#   - kind cluster "nc-exapps" running (see docs/kubernetes-local-setup.md)
+#   - kind cluster "nc-exapps" running
 #   - kubectl context set to kind-nc-exapps
-#   - Nextcloud Docker-Dev running with nginx proxy
-#   - nginx vhost configured to proxy /exapps/ to HaRP (see docs)
+#   - Nextcloud Docker-Dev running with nginx proxy, published on all host interfaces
+#     (IP_BIND=0.0.0.0 in its .env; with the default 127.0.0.1 ExApp pods cannot reach it)
+#   - nginx vhost configured to proxy /exapps/ to HaRP (see README)
 
 set -e
 
@@ -18,7 +19,6 @@ KIND_NODE="${KIND_CLUSTER}-control-plane"
 K8S_CONTEXT="kind-${KIND_CLUSTER}"
 K8S_NAMESPACE="nextcloud-exapps"
 K8S_SA="harp-exapps"
-NC_DOCKER_NETWORK="master_default"
 
 HP_SHARED_KEY="some_very_secure_password"
 NC_INSTANCE_URL="http://nextcloud.local"
@@ -32,26 +32,28 @@ echo "==> Generating fresh bearer token for SA '$K8S_SA' (valid 1 year)..."
 K8S_BEARER_TOKEN=$(kubectl --context "$K8S_CONTEXT" -n "$K8S_NAMESPACE" create token "$K8S_SA" --duration=8760h)
 echo "    Token generated (${#K8S_BEARER_TOKEN} chars)"
 
-# ── Ensure kind node can reach the Nextcloud Docker network ───────────
-echo "==> Connecting kind node '$KIND_NODE' to Docker network '$NC_DOCKER_NETWORK'..."
-if docker network connect "$NC_DOCKER_NETWORK" "$KIND_NODE" 2>/dev/null; then
-  echo "    Connected."
-else
-  echo "    Already connected (or network not found)."
-fi
-
-# Detect the nginx proxy IP on NC_DOCKER_NETWORK for pod DNS resolution.
+# Detect the gateway IP of the kind Docker network for pod DNS resolution.
 # Pods inside the kind cluster cannot resolve hostnames like "nextcloud.local" that only exist in the host's /etc/hosts.
-# Try to inject hostAliases so that ExApp pods can reach Nextcloud.
-echo "==> Detecting nginx proxy IP for host aliases..."
-PROXY_IP=$(docker inspect master-proxy-1 \
-  --format "{{(index .NetworkSettings.Networks \"$NC_DOCKER_NETWORK\").IPAddress}}" 2>/dev/null || true)
+# The gateway is the host itself, so an alias to it lets ExApp pods reach Nextcloud through the ports the nginx proxy
+# publishes on all interfaces (a proxy bound to 127.0.0.1 only is not reachable this way).
+echo "==> Detecting the kind gateway IP for host aliases..."
+KIND_HOST_IP=$(docker inspect "$KIND_NODE" \
+  --format "{{(index .NetworkSettings.Networks \"kind\").Gateway}}" 2>/dev/null || true)
+NC_HOSTNAME="$(echo "$NC_INSTANCE_URL" | awk -F'[/:]' '{print $4}')"
 K8S_HOST_ALIASES=""
-if [ -n "$PROXY_IP" ]; then
-  K8S_HOST_ALIASES="nextcloud.local:${PROXY_IP}"
-  echo "    nextcloud.local -> $PROXY_IP"
+if [ -z "$NC_HOSTNAME" ]; then
+  echo "    WARNING: Could not extract a hostname from NC_INSTANCE_URL='$NC_INSTANCE_URL'."
+elif [ "${NC_HOSTNAME#*[!0-9.]}" = "$NC_HOSTNAME" ]; then
+  echo "    ${NC_HOSTNAME} is an IP address, no host alias needed."
+elif [ -n "$KIND_HOST_IP" ]; then
+  K8S_HOST_ALIASES="${NC_HOSTNAME}:${KIND_HOST_IP}"
+  echo "    ${NC_HOSTNAME} -> $KIND_HOST_IP"
+  if ! docker exec "$KIND_NODE" curl -fsSk -m 5 -o /dev/null \
+    --connect-to "${NC_HOSTNAME}::${KIND_HOST_IP}:" "${NC_INSTANCE_URL%/}/status.php"; then
+    echo "    WARNING: Nextcloud did not answer on $KIND_HOST_IP from the kind node. Is the proxy published on all interfaces (IP_BIND=0.0.0.0)?"
+  fi
 else
-  echo "    WARNING: Could not detect proxy IP. ExApp pods may not resolve nextcloud.local."
+  echo "    WARNING: Could not detect the kind gateway IP. ExApp pods may not resolve ${NC_HOSTNAME}."
 fi
 
 echo "==> Removing old HaRP container..."
