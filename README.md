@@ -416,6 +416,187 @@ The FRP client-server connections, i.e. the connection from the above FRP client
 > ExApps deployed through HaRP embed these certificates at install time, so after regenerating them you must
 > **remove and re-install each ExApp** for it to pick up the new certificates (a restart is not enough).
 
+## Kubernetes Backend
+
+Besides Docker, HaRP can deploy ExApps directly to a Kubernetes cluster. Set `HP_K8S_ENABLED=true` and HaRP
+manages the ExApps itself through the Kubernetes API instead of a Docker Engine, creating one `Deployment` (one
+per role for multi-role ExApps) and one shared `PersistentVolumeClaim` per ExApp inside a single namespace, plus
+one `Service` for the `nodeport`, `clusterip` and `loadbalancer` exposure types (`manual` exposure stores the
+upstream address as annotations on the `Deployment` instead).
+
+The namespace and storage behaviour are controlled by these variables:
+
+  - **`HP_K8S_ENABLED`**
+    - **Description:** Enables the Kubernetes backend. HaRP then talks to the Kubernetes API instead of a Docker Engine.
+    - **Default:** `false`
+  - **`HP_K8S_NAMESPACE`**
+    - **Description:** The namespace in which HaRP creates and manages the ExApp resources. HaRP never creates this namespace itself.
+    - **Default:** `nextcloud-exapps`
+  - **`HP_K8S_STORAGE_CLASS`**
+    - **Description:** Storage class for the ExApp persistent volume claims. Leave empty to use the cluster default.
+    - **Default:** empty
+  - **`HP_K8S_DEFAULT_STORAGE_SIZE`**
+    - **Description:** Default size of the persistent volume claim that HaRP creates for each ExApp.
+    - **Default:** `10Gi`
+  - **`HP_K8S_HOST_ALIASES`**
+    - **Description:** Additional host aliases set on the ExApp pods, as a comma-separated list of `hostname:ip` pairs, e.g. `nextcloud.example.com:10.0.0.5`. Useful when your Nextcloud domain is not resolvable by the cluster DNS.
+    - **Default:** empty
+
+How HaRP reaches the API server:
+
+  - **`HP_K8S_API_SERVER`**
+    - **Description:** URL of the Kubernetes API server. Use an `https://` URL: HaRP sends its bearer token with every request, and it does not reject other schemes, so any other scheme transmits the token in clear text.
+    - **Default:** derived from the in-cluster environment (`https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT`) when HaRP runs as a pod, otherwise empty
+  - **`HP_K8S_BEARER_TOKEN`** / **`HP_K8S_BEARER_TOKEN_FILE`**
+    - **Description:** The service account token, as a value or as a file path. Set only one of them. The value is read once at startup and never refreshed; the file is re-read on every request, so a token that is rotated in place is picked up.
+    - **Default:** the token mounted into the pod, `/var/run/secrets/kubernetes.io/serviceaccount/token`
+  - **`HP_K8S_CA_FILE`**
+    - **Description:** CA certificate used to verify the API server. Needed outside the cluster when the API server uses a private CA. If the file does not exist, HaRP falls back to the system trust store.
+    - **Default:** the CA mounted into the pod, `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`
+  - **`HP_K8S_VERIFY_SSL`**
+    - **Description:** Set to `false` to skip verification of the API server certificate. Only for test clusters.
+    - **Default:** `true`
+
+Inside the cluster nothing has to be set beyond `HP_K8S_ENABLED`: HaRP authenticates with the service account
+mounted into its pod. Outside the cluster, point `HP_K8S_API_SERVER` at the API server and supply the token of
+a service account that carries the permissions below. Give that token a lifetime that outlives HaRP:
+`kubectl create token` issues a one hour token by default, so pass `--duration` (the development scripts use
+`8760h`) or bind a `kubernetes.io/service-account-token` Secret to the account for a token that does not expire.
+The `/info` endpoint reports whether the API server answers; that probe reads the discovery endpoint `/api`,
+which every authenticated identity may read by default, so it needs no permission of its own. It proves
+connectivity and authentication only: with a wrong `RoleBinding` the API server is still reported as reachable,
+and the missing permission surfaces as a `403` on the first install.
+
+### RBAC Permissions
+
+HaRP uses the Kubernetes API only to manage ExApp workloads, and only inside `HP_K8S_NAMESPACE`. The following
+is the **complete** set of permissions it requires. Nothing wider is needed, and a namespaced `Role` is enough
+for every exposure type except `NodePort` (see below).
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: harp-exapps
+  namespace: nextcloud-exapps   # the ExApp namespace, must match HP_K8S_NAMESPACE
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: harp-exapps
+  namespace: nextcloud-exapps   # the ExApp namespace, where the Role lives
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: harp-exapps
+subjects:
+  - kind: ServiceAccount
+    name: harp                  # the service account of the HaRP pod, or the one whose token HaRP uses
+    namespace: nextcloud        # the namespace the HaRP pod runs in, not the ExApp namespace
+```
+
+The `Role` and the `RoleBinding` live in the ExApp namespace, because that is where the permissions apply. The
+subject is the service account HaRP authenticates with, which usually lives in another namespace (the one the
+HaRP pod runs in, or wherever the token for an out-of-cluster HaRP was issued). If the subject's `name` or
+`namespace` do not match that account exactly, every request HaRP makes answers `403`. The manifest creates
+neither the namespace nor the service account: create them first (`kubectl create namespace nextcloud-exapps`,
+`kubectl -n nextcloud create serviceaccount harp`) and run the HaRP pod with `serviceAccountName: harp`.
+
+What each permission is used for:
+
+| Resource | Verbs | Used for |
+| --- | --- | --- |
+| `apps/deployments` | `create` | Creating the ExApp `Deployment` when an ExApp is installed. |
+| `apps/deployments` | `get`, `list` | Checking whether an ExApp already exists before it is installed, and reading the upstream address of a `manual` ExApp back from the `Deployment` annotations when the ExApp is enabled and after a HaRP restart. |
+| `apps/deployments` | `patch` | Scaling an ExApp to 1 replica when it is enabled and to 0 when it is disabled, and recording the exposure details on the `Deployment`. Strategic merge patches only. |
+| `apps/deployments` | `delete` | Removing an ExApp. |
+| `services` | `create`, `get`, `list`, `delete` | Exposing an ExApp, reading the assigned port or address back when the ExApp is enabled and after a HaRP restart, waiting for a `LoadBalancer` address to be assigned, and cleaning up on removal. `manual` exposure creates no `Service`, but `get` and `list` are still used: HaRP looks for a `Service` before it reads the `Deployment` annotations, and checks for one on removal. |
+| `persistentvolumeclaims` | `create`, `delete` | The volume that backs an ExApp, sized via `HP_K8S_DEFAULT_STORAGE_SIZE` and placed via `HP_K8S_STORAGE_CLASS`. |
+| `pods` | `list` | Polling readiness while an ExApp starts, so that image pull failures are reported at once instead of after the startup timeout. |
+
+HaRP does **not** need, and never requests, any of: `secrets`, `configmaps`, `events`, `namespaces`,
+`pods/log`, `pods/exec`, `watch` on any resource, or `update` on any resource. It does not create the
+namespace, and it sets no `ownerReferences`, so nothing is garbage-collected implicitly.
+
+### NodePort Also Needs `nodes`
+
+`nodes` is cluster-scoped and therefore cannot be granted by a namespaced `Role`. HaRP reads it whenever an
+ExApp is exposed as `NodePort` (`occ app_api:daemon:register ... --k8s_expose_type nodeport`), because it has to
+pick a node address to route to. It does so when the ExApp is exposed, again when AppAPI enables the ExApp, and
+after every HaRP restart, when the upstream address is resolved from the `Service` anew. A fixed
+`--k8s_upstream_host` only skips the lookup during the expose call itself, so the permission is still needed:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: harp-nodes
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: harp-nodes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: harp-nodes
+subjects:
+  - kind: ServiceAccount
+    name: harp                  # the same service account as in the RoleBinding above
+    namespace: nextcloud
+```
+
+With `clusterip` (the default of `occ app_api:daemon:register --k8s_expose_type`), `loadbalancer` or `manual`
+exposure HaRP never reads `nodes`, and the namespaced `Role` above is sufficient on its own, with no
+cluster-scoped permissions at all.
+
+### Can Write Access Be Limited to Deployment Time?
+
+No. Kubernetes RBAC is static, so there is no time-boxed or just-in-time grant. The only way to approximate it
+would be to add and remove the `RoleBinding` around each operation.
+
+It would also not achieve much, because writes are not confined to ExApp installation. Enabling an ExApp
+patches its `Deployment` to 1 replica, disabling it patches it back to 0, and removing it deletes the
+`Deployment`, the `Service` HaRP created and, when the data is removed too, the `PersistentVolumeClaim`. These
+are routine administrator actions in the Nextcloud UI rather than one-off deployment steps. If the service
+account only had `get` and `list` at that moment, the Kubernetes API would answer `403` and HaRP would surface
+the failure to the administrator.
+
+The reduction that does work is scope rather than time, and the `Role` above already applies it: a single
+namespace, four resource types, no `watch`, no `update`, no access to `secrets` or `configmaps`, and no
+cluster-scoped permission at all unless `NodePort` is in use.
+
+### Hardening the ExApp Pods
+
+HaRP does not set `serviceAccountName` on the ExApp pods, so they run under the `default` service account of
+`HP_K8S_NAMESPACE`. Leave that service account without any `RoleBinding`, which is how it starts out, and
+consider setting `automountServiceAccountToken: false` on it so that ExApp containers receive no Kubernetes
+API credentials at all.
+
+HaRP sets no `imagePullSecrets` on the ExApp pods either. If the ExApp images come from a registry that needs
+authentication, add the pull secret to that `default` service account (`kubectl -n <namespace> patch
+serviceaccount default -p '{"imagePullSecrets":[{"name":"<secret>"}]}'`); Kubernetes then attaches it to every
+pod that runs under that service account, which is all ExApp pods. ExApp containers use
+`imagePullPolicy: IfNotPresent`, or `Never` when AppAPI maps the image registry to `local`, in which case the
+image has to be present on every node that can run the pod.
+
 ## Adapting ExApps to use HaRP
 
 > We strongly recommend starting support for `HaRP` in ExApps from the start of Nextcloud `32`, as the old `DSP` way will be deprecated and marked for removal in Nextcloud `35`.
