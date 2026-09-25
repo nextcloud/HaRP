@@ -116,6 +116,9 @@ server {
 
     location /exapps/ {
         proxy_pass http://127.0.0.1:8780/exapps/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -125,10 +128,14 @@ server {
 }
 ```
 
-If you point `proxy_pass` at a container or DNS name instead of an IP (for example `appapi-harp` on a Docker
-network), do not write the name into `proxy_pass` directly: nginx resolves it once at startup and refuses to
-start whenever that container is absent (`host not found in upstream`), which takes every site on that nginx down.
-Put the upstream in a variable, which nginx resolves per request, and give it a resolver:
+The `proxy_http_version` and the `Upgrade`/`Connection` headers let WebSocket connections through to ExApps;
+nginx drops them otherwise.
+
+If you point `proxy_pass` at a container or DNS name instead of an IP (for example `appapi-harp` on a
+user-defined Docker network), do not write the name into `proxy_pass` directly: nginx resolves it once at startup
+and refuses to start whenever that container is absent (`host not found in upstream`), which takes every site on
+that nginx down. Put the upstream in a variable, which nginx resolves per request, and give it a resolver. Use
+this block instead of the one above, not next to it:
 
 ```nginx
 server {
@@ -141,6 +148,9 @@ server {
 
     location /exapps/ {
         proxy_pass $harp_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -149,6 +159,10 @@ server {
     }
 }
 ```
+
+`127.0.0.11` only answers inside containers on a user-defined network (such as a Compose network), not on the
+default `bridge` network and not for nginx on the host. nginx's `resolver` also ignores `/etc/hosts`, so names
+added with `--add-host` or `extra_hosts` do not resolve this way; keep the plain `proxy_pass` form for those.
 
 ### Caddy Example
 
