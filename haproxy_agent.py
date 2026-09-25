@@ -249,6 +249,9 @@ class CreateExAppPayload(ExAppName):
     )
     mount_points: list[CreateExAppMounts] = Field([], description="List of mount points for the container.")
     resource_limits: dict[str, Any] = Field({}, description="Resource limits for the container.")
+    image_pull_policy: Literal["IfNotPresent", "Never", "Always"] = Field(
+        "IfNotPresent", description="Kubernetes imagePullPolicy of the ExApp container (Kubernetes backend only)."
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -2426,7 +2429,7 @@ def _k8s_build_deployment_manifest(payload: CreateExAppPayload, replicas: int) -
     container: dict[str, Any] = {
         "name": "app",
         "image": payload.image_id,
-        "imagePullPolicy": "IfNotPresent",
+        "imagePullPolicy": payload.image_pull_policy,
         "env": _k8s_parse_env(payload.environment_variables),
     }
 
@@ -3044,7 +3047,7 @@ async def k8s_exapp_wait_for_start(request: web.Request):
                 )
 
             # Fail fast on image pull errors.
-            if waiting_reason in ("ErrImagePull", "ImagePullBackOff", "InvalidImageName"):
+            if waiting_reason in ("ErrImagePull", "ImagePullBackOff", "ErrImageNeverPull", "InvalidImageName"):
                 wait_msg = container_statuses[0].get("state", {}).get("waiting", {}).get("message", "")
                 LOGGER.error(
                     "Deployment '%s' pod has image pull error: %s - %s",
