@@ -127,16 +127,27 @@ server {
 
 If you point `proxy_pass` at a container or DNS name instead of an IP (for example `appapi-harp` on a Docker
 network), do not write the name into `proxy_pass` directly: nginx resolves it once at startup and refuses to
-start whenever that container is absent (`host not found in upstream`), which takes the whole server block down.
+start whenever that container is absent (`host not found in upstream`), which takes every site on that nginx down.
 Put the upstream in a variable, which nginx resolves per request, and give it a resolver:
 
 ```nginx
+server {
+    listen 80;
+    server_name nextcloud.com;
+
     resolver 127.0.0.11 valid=30s;   # Docker's embedded DNS; use your own resolver outside Docker
+    # no /exapps/ suffix: with a variable, nginx would send every request to exactly that path
     set $harp_upstream http://appapi-harp:8780;
+
     location /exapps/ {
         proxy_pass $harp_upstream;
-        # the same proxy_set_header and proxy_read_timeout lines as above
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 1800s;
     }
+}
 ```
 
 ### Caddy Example
