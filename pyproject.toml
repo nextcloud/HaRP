@@ -23,3 +23,7 @@ lint.extend-per-file-ignores."tests/**/*.py" = [
 
 [tool.isort]
 profile = "black"
+
+[tool.pytest.ini_options]
+# tests/test_k8s_routing.py is an integration test the K8s workflows run against a live cluster.
+testpaths = ["tests/unit"]
