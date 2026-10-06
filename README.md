@@ -298,10 +298,38 @@ HaRP is configured via several environment variables. Here are the key variables
   - **Description:** The base URL of your Nextcloud instance.
   - **Requirement:** Must be accessible from the HaRP container.
 
+- **`HP_DOCKER_ENGINE_PORTS`**
+  - **Description:** Comma-separated ports and ranges on HaRP's loopback interface that AppAPI may address with its `docker-engine-port` header. Requests for any other port are refused (`403` on the Docker API passthrough, `400` on the `/docker/exapp/*` endpoints).
+  - **Default:** `HP_DOCKER_ENGINE_PORTS="24000-24099"`, the range the FRP server's configuration reserves for Docker Engine tunnels (`24000` is the bundled engine, `24001-24099` are remote engines).
+  - **Example:** `HP_DOCKER_ENGINE_PORTS="24000-24099,2375"`
+  - **Note:** Add a port when AppAPI reaches a Docker Engine through another one: a remote engine whose FRP tunnel uses a port in `23000-23999` (the FRP server accepts these as well, although they are meant for ExApps), or a socket proxy that HaRP reaches over host networking. HaRP passes no credentials to these ports (it removes `harp-shared-key` and `Authorization`), so such a proxy must accept requests without them and should listen on 127.0.0.1 only. An empty value means the default; HaRP does not start with a malformed one.
+
 - **`HP_FRP_DISABLE_TLS`**
   - **Description:** Disables TLS for the FRP service.
   - **Default:** `HP_FRP_DISABLE_TLS="false"`
   - **Advanced:** Use only for specialized setups where TCP TLS termination is managed externally.
+
+- **`HP_EXAPP_BIND_MOUNTS_DISABLED`** / **`HP_EXAPP_BIND_MOUNTS_ALLOWED`** / **`HP_EXAPP_BIND_MOUNTS_DENIED`** / **`HP_EXAPP_BIND_MOUNTS_ENFORCE_ALL`**
+  - **Description:** Rules for the host paths that may be bind mounted into ExApp containers on a Docker Engine (the mounts an administrator adds in the deploy options of an ExApp). A container whose mounts break a rule is not created, and the answer names the rule and the mount; AppAPI shows it to the administrator and HaRP writes it to its log.
+    - `HP_EXAPP_BIND_MOUNTS_DISABLED`: set to `true` (or `1`, `yes`) to refuse every bind mount.
+    - `HP_EXAPP_BIND_MOUNTS_ALLOWED`: comma-separated list of host paths. When set, only these paths and the paths below them may be mounted.
+    - `HP_EXAPP_BIND_MOUNTS_DENIED`: comma-separated list of host paths that may not be mounted. A mount is refused when its source is a listed path, lies below one, or is a parent of one. Add `:rw` to an entry to refuse only read-write mounts of it. Setting this variable replaces the default list, and an empty value removes it.
+    - `HP_EXAPP_BIND_MOUNTS_ENFORCE_ALL`: in this release, a mount refused only by `/dev`, `/run`, `/var/run`, `/root`, `/var/lib/docker/volumes`, `/var/lib/containers/storage/volumes` or a `:rw` entry of the default list is permitted with a warning naming the mount, the ExApp container, the rule and how to keep the mount, and so is a mount mode other than `ro` or `rw` (such as `z` or `RO`, which mounts read-write as it always did); a later release will refuse both. Set to `true` to refuse such mounts now. A mount that contains one of the other entries, such as `/run` or `/var/run` themselves, is always refused. The entries of a list you set in `HP_EXAPP_BIND_MOUNTS_DENIED` are always enforced.
+  - **Default:**
+    - `HP_EXAPP_BIND_MOUNTS_DISABLED="false"`
+    - `HP_EXAPP_BIND_MOUNTS_ALLOWED=""` (any path that is not denied)
+    - `HP_EXAPP_BIND_MOUNTS_DENIED="/proc,/sys,/boot,/var/lib/docker,/var/lib/containerd,/var/lib/containers,/run/docker.sock,/var/run/docker.sock,/run/containerd,/var/run/containerd,/run/podman,/var/run/podman,/run/crio,/var/run/crio,/etc/shadow,/etc/gshadow,/etc/sudoers,/etc/sudoers.d,/etc/ssh,/dev,/run,/var/run,/root,/var/lib/docker/volumes,/var/lib/containers/storage/volumes,/etc:rw,/usr:rw,/bin:rw,/sbin:rw,/lib:rw,/lib64:rw,/var/spool:rw"` (kernel interfaces, the container runtimes' sockets and state, and host credentials; then device and runtime trees, root's home, the Docker and Podman volume directories, and read-write access to the host's programs and spool directories)
+    - `HP_EXAPP_BIND_MOUNTS_ENFORCE_ALL="false"`
+  - **Example:** `HP_EXAPP_BIND_MOUNTS_ALLOWED="/mnt/models,/srv/exapps"`
+  - **Note:**
+    - When an allowed and a denied entry both cover a mount, the more specific (longer) one decides, and a denied entry wins a tie. With the default list, `HP_EXAPP_BIND_MOUNTS_ALLOWED="/mnt/models,/var/run/mysqld"` permits `/var/run/mysqld/mysqld.sock` while `/var/run/docker.sock` stays refused. Because an allowed list restricts every other mount too, list all the sources you mount when you add an exception.
+    - `HP_EXAPP_BIND_MOUNTS_DENIED="/"` together with an allowed list permits nothing but the listed paths.
+    - A mount without a mode is read-write (`occ app_api:app:register --mount SRC:DST` means `rw`), so add `:ro` to read-only mounts of system paths such as `/etc/localtime` or `/usr/share/zoneinfo`.
+    - On Docker Desktop for Windows, host paths look like `/run/desktop/mnt/host/c/...` and fall under `/run`; set `HP_EXAPP_BIND_MOUNTS_ALLOWED="/run/desktop/mnt/host"` there. The sockets of rootless Docker and Podman (`/run/user/<uid>/...`) also fall under `/run` only, so in this release they are permitted with a warning.
+    - Paths are normalized (`//`, `/./` and a trailing `/` are removed), compared as text, and sent to Docker in that form. HaRP cannot see symbolic links on the Docker host, so set `HP_EXAPP_BIND_MOUNTS_ALLOWED` when you need a strict rule.
+    - Entries are separated by commas; quotes around the whole value or around an entry are ignored. Every path must be absolute and must not contain a `..` segment, `:` or control characters (apart from the `:rw` suffix, which only `HP_EXAPP_BIND_MOUNTS_DENIED` accepts); a path may contain blanks, but several paths separated by blanks are an error. HaRP does not start with a malformed entry or a true/false value it does not recognize.
+    - The source and the target of a mount must be absolute paths without a `..` segment, `:` or control characters. The mode should be `ro` or `rw`; any other mode mounts read-write (see `HP_EXAPP_BIND_MOUNTS_ENFORCE_ALL`). The Kubernetes backend does not support bind mounts.
+  - **Upgrading:** AppAPI stores the mounts given when an ExApp is installed and sends them again on every update of that ExApp, after it has removed the old container. If a stored mount is refused (a denied path, or a path that is relative or contains a `..` segment, `:` or control characters), the update fails and the ExApp is left without a container. All entries of the default list except `/dev`, `/run`, `/var/run`, `/root`, the two volume directories and the `:rw` entries are refused from this release on, and so is a mount that contains one of them (such as `/run`, `/var/run`, `/etc`, `/var` or `/` themselves). For example, a mount of a Docker volume's data directory (`/var/lib/docker/volumes/<volume>/_data`) is permitted with a warning, while other paths below `/var/lib/docker` are refused. Every request for a daemon whose Docker Engine port (`--harp_docker_socket_port`) is not in `HP_DOCKER_ENGINE_PORTS` is refused as well (deploying, updating, enabling, disabling, removing and AppAPI's daemon check; ExApps that are already running keep serving), so add such a port to that variable first. If you mount your own `/haproxy.cfg`, copy the new `http-request del-header` lines of `haproxy.cfg.template` into it. Before upgrading HaRP, check the mounts of your ExApps (shown in their deploy options) against these rules. AppAPI has already stored the new version when such an update fails, so `occ app_api:app:update` will not retry it, and changing the rule alone does nothing until the next ExApp update. To recover, unregister the ExApp with `occ app_api:app:unregister <appid> --force` (its data is kept unless you add `--rm-data`) and register it again, with corrected mounts or after changing the rule.
 
 - **`HP_LOG_LEVEL`**
   - **Default:** `warning`
@@ -786,13 +814,14 @@ curl -fsS \
 ```
 
 * `24000` is the **default** FRP remote port used by the HaRP container for the **built‑in/local** Docker Engine (enabled when `/var/run/docker.sock` is mounted).
-* If you have connected **additional** Docker Engines via FRP, replace `24000` with the corresponding `remotePort` you configured (typically `24001–24099`).
+* If you have connected **additional** Docker Engines via FRP, replace `24000` with the corresponding `remotePort` you configured (`24001-24099`).
 * A response body of `OK` means the Docker Engine API is reachable from HaRP.
 
 **Common outcomes**
 
 * `OK` – Success: HaRP can reach the Docker Engine on the given port.
 * `401 Unauthorized` – The `harp-shared-key` header does not match `HP_SHARED_KEY`.
+* `403 Forbidden` - The `docker-engine-port` header is not a port listed in `HP_DOCKER_ENGINE_PORTS` (default `24000-24099`).
 * `503 Service Unavailable` / `504 Gateway Timeout` – Wrong docker-engine-port, FRP tunnel is down, or the Docker Engine is not reachable.
 * Connection errors – The address in `HP_EXAPPS_ADDRESS` (port `8780` by default) is not reachable from where you ran curl.
 
@@ -821,7 +850,7 @@ These checks run **inside the HaRP container** (e.g., `docker exec -it appapi-ha
 
 **2) Remote Docker Engine over FRP**
 
-   For each external Docker Engine you connected via FRP (each with a unique `remotePort`, typically **24001–24099**), test the TCP port that FRP exposes **on the HaRP container**:
+   For each external Docker Engine you connected via FRP (each with a unique `remotePort` in the range **24001-24099**), test the TCP port that FRP exposes **on the HaRP container**:
 
    ```
    # Replace 24001 with the remotePort you configured in that engine's frpc.toml

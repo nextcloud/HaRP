@@ -5,11 +5,14 @@
 
 import asyncio
 import collections
+import hashlib
+import hmac
 import io
 import ipaddress
 import json
 import logging
 import os
+import posixpath
 import re
 import socket
 import ssl
@@ -25,7 +28,14 @@ import aiohttp
 from aiohttp import web
 from haproxyspoa.payloads.ack import AckPayload
 from haproxyspoa.spoa_server import SpoaServer
-from pydantic import BaseModel, Field, ValidationError, computed_field, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 # Reported by `/info`; AppAPI compares it against its minimum supported HaRP version.
 # Keep it in sync with the release tag and use a full `x.y.z` string: a bare float like `0.4`
@@ -82,6 +92,11 @@ _nc_session: aiohttp.ClientSession | None = None
 
 SPOA_AGENT = SpoaServer()
 DOCKER_API_HOST = "127.0.0.1"
+# The ports the FRP server accepts Docker Engine tunnels on (see `allowPorts` in start.sh); HP_DOCKER_ENGINE_PORTS
+# can add others for setups where HaRP shares its network namespace with the Docker Engine or a socket proxy.
+DEFAULT_DOCKER_ENGINE_PORTS = "24000-24099"
+# Headers whose values are never written to the log.
+REDACTED_LOG_HEADERS = frozenset({"harp-shared-key", "authorization-app-api", "authorization", "cookie"})
 
 
 def _parse_trusted_proxies(value: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
@@ -144,6 +159,145 @@ def _parse_trusted_proxies(value: str) -> list[ipaddress.IPv4Network | ipaddress
 
 TRUSTED_PROXIES = _parse_trusted_proxies(os.environ.get("HP_TRUSTED_PROXY_IPS", ""))
 
+# The entries of the default list after the hard core only log a warning in this release (see
+# HP_EXAPP_BIND_MOUNTS_ENFORCE_ALL): AppAPI re-sends the mounts stored at install on every ExApp update, after it
+# has removed the old container, so refusing a mount that used to work would leave the ExApp without a container.
+_STAGED_BIND_MOUNTS_DENIED = (
+    "/dev,/run,/var/run,/root,/var/lib/docker/volumes,/var/lib/containers/storage/volumes,"
+    "/etc:rw,/usr:rw,/bin:rw,/sbin:rw,/lib:rw,/lib64:rw,/var/spool:rw"
+)
+# Host paths ExApp containers may not bind mount unless HP_EXAPP_BIND_MOUNTS_DENIED says otherwise: the hard core
+# (kernel interfaces, the container runtimes' sockets and state, host credentials), which no ExApp has a reason to
+# mount; then device and runtime trees, root's home, the Docker and Podman volume directories, and read-write access
+# to the host's programs and spool directories.
+DEFAULT_BIND_MOUNTS_DENIED = (
+    "/proc,/sys,/boot,/var/lib/docker,/var/lib/containerd,/var/lib/containers,"
+    "/run/docker.sock,/var/run/docker.sock,/run/containerd,/var/run/containerd,"
+    "/run/podman,/var/run/podman,/run/crio,/var/run/crio,"
+    "/etc/shadow,/etc/gshadow,/etc/sudoers,/etc/sudoers.d,/etc/ssh," + _STAGED_BIND_MOUNTS_DENIED
+)
+DEFAULT_BIND_MOUNTS_STAGED = frozenset(_STAGED_BIND_MOUNTS_DENIED.split(","))
+
+
+def _has_control_characters(value: str) -> bool:
+    return any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
+def _setting_items(value: str) -> list[str]:
+    """Split a comma-separated setting; quotes reach us literally from an env-file or a compose list entry."""
+    return [item for raw in value.split(",") if (item := raw.strip().strip("'\"").strip())]
+
+
+def _normalize_mount_path(value: str) -> str:
+    """Return the normalized form of an absolute path; raise ValueError for anything else."""
+    if not value.startswith("/"):
+        raise ValueError("must be an absolute path")
+    if ":" in value:
+        raise ValueError("must not contain ':'")
+    if _has_control_characters(value):
+        raise ValueError("must not contain control characters")
+    if ".." in value.split("/"):
+        raise ValueError("must not contain '..' segments")
+    return posixpath.normpath("/" + value.lstrip("/"))
+
+
+def _parse_mount_rules(env_name: str, value: str, rw_suffix: bool = False) -> list[tuple[str, bool]]:
+    """Parse a comma-separated list of host paths into (path, read-write only) rules.
+
+    A malformed entry stops the agent: silently dropping it would change which mounts are permitted.
+    """
+    rules: list[tuple[str, bool]] = []
+    for item in _setting_items(value):
+        rw_only = rw_suffix and item.endswith(":rw")
+        if rw_only:
+            item = item.removesuffix(":rw").strip().strip("'\"").strip()
+        words = item.split()
+        if len(words) > 1 and all(word.startswith("/") for word in words):
+            raise SystemExit(f"ERROR: invalid entry {item!r} in {env_name}: separate the paths with commas.")
+        try:
+            rules.append((_normalize_mount_path(item), rw_only))
+        except ValueError as e:
+            raise SystemExit(f"ERROR: invalid entry {item!r} in {env_name}: {e}.") from None
+    return rules
+
+
+def _parse_bool(env_name: str) -> bool:
+    """Read a true/false setting that defaults to false; anything else stops the agent instead of meaning false."""
+    value = os.environ.get(env_name, "")
+    item = value.strip().strip("'\"").strip().lower()
+    if item in {"", "0", "false", "no"}:
+        return False
+    if item in {"1", "true", "yes"}:
+        return True
+    raise SystemExit(f"ERROR: invalid value {value!r} in {env_name}: expected true or false.")
+
+
+def _rule_label(path: str, rw_only: bool) -> str:
+    return f"{path}:rw" if rw_only else path
+
+
+BIND_MOUNTS_DISABLED = _parse_bool("HP_EXAPP_BIND_MOUNTS_DISABLED")
+BIND_MOUNTS_ENFORCE_ALL = _parse_bool("HP_EXAPP_BIND_MOUNTS_ENFORCE_ALL")
+BIND_MOUNTS_ALLOWED = [
+    path
+    for path, _ in _parse_mount_rules(
+        "HP_EXAPP_BIND_MOUNTS_ALLOWED", os.environ.get("HP_EXAPP_BIND_MOUNTS_ALLOWED", "")
+    )
+]
+_denied_setting = os.environ.get("HP_EXAPP_BIND_MOUNTS_DENIED")
+BIND_MOUNTS_DENIED = _parse_mount_rules(
+    "HP_EXAPP_BIND_MOUNTS_DENIED",
+    DEFAULT_BIND_MOUNTS_DENIED if _denied_setting is None else _denied_setting,
+    rw_suffix=True,
+)
+# Rules that only log a warning: the staged entries of the default list. A list the administrator sets is
+# always enforced as written.
+BIND_MOUNTS_WARN_ONLY = (
+    frozenset() if _denied_setting is not None or BIND_MOUNTS_ENFORCE_ALL else DEFAULT_BIND_MOUNTS_STAGED
+)
+if _denied_setting is not None:
+    if BIND_MOUNTS_DENIED:
+        LOGGER.warning("HP_EXAPP_BIND_MOUNTS_DENIED replaces the default list of denied host paths.")
+    else:
+        LOGGER.warning("HP_EXAPP_BIND_MOUNTS_DENIED is empty: no host path is denied to ExApp containers.")
+if BIND_MOUNTS_DISABLED:
+    LOGGER.info("Bind mounts for ExApp containers are disabled.")
+else:
+    LOGGER.info(
+        "Bind mounts for ExApp containers: allowed below %s, denied %s%s.",
+        BIND_MOUNTS_ALLOWED or "any path",
+        [_rule_label(path, rw_only) for path, rw_only in BIND_MOUNTS_DENIED] or "nothing",
+        f" (only a warning for {sorted(BIND_MOUNTS_WARN_ONLY)})" if BIND_MOUNTS_WARN_ONLY else "",
+    )
+
+
+def _parse_port_ranges(env_name: str, value: str) -> list[tuple[int, int]]:
+    """Parse comma-separated ports ("2375") and ranges ("24000-24099"); a malformed entry stops the agent."""
+    ranges: list[tuple[int, int]] = []
+    for item in _setting_items(value):
+        first, dash, last = item.partition("-")
+        try:
+            first_port = int(first)
+            last_port = int(last) if dash else first_port
+        except ValueError:
+            raise SystemExit(
+                f"ERROR: invalid entry {item!r} in {env_name}: expected a port or a range like 24000-24099."
+            ) from None
+        if not 1 <= first_port <= last_port <= 65535:
+            raise SystemExit(f"ERROR: invalid entry {item!r} in {env_name}: ports must be 1-65535, ranges ascending.")
+        ranges.append((first_port, last_port))
+    return ranges
+
+
+# An empty value (e.g. a template passing an unset variable) means the default.
+DOCKER_ENGINE_PORTS = _parse_port_ranges(
+    "HP_DOCKER_ENGINE_PORTS", os.environ.get("HP_DOCKER_ENGINE_PORTS", "")
+) or _parse_port_ranges("HP_DOCKER_ENGINE_PORTS", DEFAULT_DOCKER_ENGINE_PORTS)
+DOCKER_ENGINE_PORTS_TEXT = ", ".join(
+    str(first) if first == last else f"{first}-{last}" for first, last in DOCKER_ENGINE_PORTS
+)
+LOGGER.info("Docker Engine ports accepted from AppAPI: %s.", DOCKER_ENGINE_PORTS_TEXT)
+
 ###############################################################################
 # Definitions
 ###############################################################################
@@ -172,7 +326,7 @@ class ExAppRoute(BaseModel):
 
 
 class ExApp(BaseModel):
-    exapp_token: str = Field(...)
+    exapp_token: str = Field(..., repr=False)  # the ExApp's secret; records are written to the log
     exapp_version: str = Field(...)
     host: str = Field(...)
     port: int = Field(...)
@@ -198,9 +352,13 @@ def _sanitize_k8s_name(raw: str) -> str:
 
 
 class ExAppName(BaseModel):
-    name: str = Field(..., description="ExApp name.")
-    instance_id: str = Field("", description="Nextcloud instance ID.")
-    role_suffix: str = Field("", description="Role suffix, e.g. 'rp', 'idx'.")
+    # The three parts end up in container, volume and hostname values and in Docker API URLs,
+    # so they are limited to the characters Docker allows in a container name.
+    name: str = Field(..., pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$", max_length=63, description="ExApp name.")
+    instance_id: str = Field("", pattern=r"^[a-zA-Z0-9_.-]*$", max_length=63, description="Nextcloud instance ID.")
+    role_suffix: str = Field(
+        "", pattern=r"^[a-zA-Z0-9_.-]*$", max_length=63, description="Role suffix, e.g. 'rp', 'idx'."
+    )
 
     @computed_field
     @property
@@ -236,14 +394,22 @@ class ExAppName(BaseModel):
 class CreateExAppMounts(BaseModel):
     source: str = Field(...)
     target: str = Field(...)
+    # Free text, as `occ app_api:app:register --mount SRC:DST:MODE` stores it; anything but "ro" mounts read-write.
     mode: str = Field("rw")
+
+    @field_validator("source", "target")
+    @classmethod
+    def normalize_path(cls, value: str) -> str:
+        return _normalize_mount_path(value)
 
 
 class CreateExAppPayload(ExAppName):
     image_id: str = Field(..., description="Docker image ID.")
     network_mode: str = Field(..., description="Desired NetworkMode for the container.")
     environment_variables: list[str] = Field([], description="ExApp environment variables.")
-    restart_policy: str = Field("unless-stopped", description="Desired RestartPolicy for the container.")
+    restart_policy: Literal["", "no", "always", "unless-stopped", "on-failure"] = Field(
+        "unless-stopped", description="Desired RestartPolicy for the container."
+    )
     compute_device: Literal["cpu", "rocm", "cuda"] = Field(
         "cpu", description="Possible values: 'cpu', 'rocm' or 'cuda'"
     )
@@ -263,6 +429,15 @@ class CreateExAppPayload(ExAppName):
             if "network_mode" not in data:
                 data = {**data, "network_mode": "bridge"}  # Default network_mode (used only for Docker)
         return data
+
+    @field_validator("network_mode")
+    @classmethod
+    def validate_network_mode(cls, value: str) -> str:
+        """Accept 'host', 'bridge' or a network name, but not the '<mode>:<argument>' forms like 'container:<id>'."""
+        separators = ":" in value or any(char.isspace() for char in value) or _has_control_characters(value)
+        if not value or len(value) > 255 or separators:
+            raise ValueError("must be 'host', 'bridge' or the name of a network")
+        return value
 
 
 class RemoveExAppPayload(ExAppName):
@@ -379,6 +554,13 @@ async def record_ip_failure(ip_address: str | IPv4Address | IPv6Address) -> None
         LOGGER.warning("Recorded failure for IP %s. Failures in window: %d", ip_str, len(attempts))
 
 
+def is_shared_key(value: Any) -> bool:
+    """Compare a presented key with HP_SHARED_KEY in constant time; an unset or empty key never matches."""
+    if not SHARED_KEY or not isinstance(value, str):
+        return False
+    return hmac.compare_digest(value.encode("utf-8", "surrogatepass"), SHARED_KEY.encode("utf-8", "surrogatepass"))
+
+
 async def record_failure_unless_trusted(
     ip_address: str | IPv4Address | IPv6Address, request_headers: dict[str, str]
 ) -> None:
@@ -388,7 +570,7 @@ async def record_failure_unless_trusted(
     on that trusted path (e.g. reverse-proxy stripping `/exapps/`) would otherwise cause the caller
     to self-DoS once the blacklist window fills up.
     """
-    if request_headers.get("harp-shared-key") == SHARED_KEY:
+    if is_shared_key(request_headers.get("harp-shared-key")):
         return
     await record_ip_failure(ip_address)
 
@@ -412,11 +594,16 @@ async def is_ip_banned(ip_address: str | IPv4Address | IPv6Address) -> bool:
 ###############################################################################
 
 
+def session_log_id(pass_cookie: str) -> str:
+    """A short identifier for log lines about a session; the cookie value itself is never written."""
+    return hashlib.sha256(pass_cookie.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+
+
 async def record_session(pass_cookie: str, nc_user: NcUser) -> None:
     now = time.time()
     async with SESSION_CACHE_LOCK:
         SESSION_CACHE[pass_cookie] = (nc_user, now)
-    LOGGER.info("Recorded session for cookie %s, User %s", pass_cookie, nc_user.user_id)
+    LOGGER.info("Recorded session %s for user %s", session_log_id(pass_cookie), nc_user.user_id)
 
 
 async def get_session(pass_cookie: str) -> NcUser | None:
@@ -431,7 +618,7 @@ async def get_session(pass_cookie: str) -> NcUser | None:
                 return nc_user
             # Session expired, remove it
             del SESSION_CACHE[pass_cookie]
-            LOGGER.info("Session for cookie %s expired", pass_cookie)
+            LOGGER.info("Session %s expired", session_log_id(pass_cookie))
     return None
 
 
@@ -459,7 +646,7 @@ async def _exapps_msg(
     request_headers = parse_headers(headers)
     client_ip_str = str(get_true_client_ip(client_ip, request_headers))
     reply = reply.set_txn_var("true_client_ip", client_ip_str)
-    LOGGER.debug("Incoming request to ExApp: path=%s, headers=%s, ip=%s", path, headers, client_ip_str)
+    log_headers("Incoming request to ExApp: path=%s, ip=%s, headers=%s", request_headers, path, client_ip_str)
 
     # Check if the IP is banned based on failed attempts in BLACKLIST_CACHE.
     if await is_ip_banned(client_ip_str):
@@ -500,8 +687,8 @@ async def _exapps_msg(
         ]
     ):
         # This is a direct request from AppAPI to ExApp using AppAPI PHP functions "requestToExAppXXX"
-        if request_headers["harp-shared-key"] != SHARED_KEY:
-            await record_ip_failure(client_ip)
+        if not is_shared_key(request_headers["harp-shared-key"]):
+            await record_ip_failure(client_ip_str)
             return reply.set_txn_var("bad_request", 1)
         authorization_app_api = request_headers["authorization-app-api"]
         # Use unified fetch path (cache + singleflight + K8s resolution)
@@ -526,7 +713,7 @@ async def _exapps_msg(
                 await record_failure_unless_trusted(client_ip_str, request_headers)
                 return reply.set_txn_var("not_found", 1)
         except ValidationError as e:
-            LOGGER.error("Invalid ExApp metadata from Nextcloud: %s", e)
+            LOGGER.error("Invalid ExApp metadata from Nextcloud: %s", describe_validation_error(e))
             return reply.set_txn_var("not_found", 1)
         except Exception as e:
             LOGGER.exception("Failed to fetch ExApp metadata from Nextcloud", exc_info=e)
@@ -550,7 +737,7 @@ async def _exapps_msg(
                     if nc_user and pass_cookie:
                         await record_session(pass_cookie, nc_user)
                 except ValidationError as e:
-                    LOGGER.error("Invalid user info from Nextcloud: %s", e)
+                    LOGGER.error("Invalid user info from Nextcloud: %s", describe_validation_error(e))
                     return reply.set_txn_var("unauthorized", 1)
                 except Exception as e:
                     LOGGER.exception("Failed to fetch user info from Nextcloud", exc_info=e)
@@ -643,14 +830,28 @@ async def handle_app_api_request(
 ) -> AckPayload:
     """Handle the special case where the ExApp ID is 'app_api'."""
     LOGGER.debug("Request from AppAPI received: %s", target_path)
-    if request_headers.get("harp-shared-key") != SHARED_KEY:
+    if not is_shared_key(request_headers.get("harp-shared-key")):
         await record_ip_failure(str_client_ip)
         return reply.set_txn_var("unauthorized", 1)
     docker_engine_port = request_headers.get("docker-engine-port")
     if docker_engine_port and not target_path.startswith("/docker/"):
-        reply = reply.set_txn_var("target_port", int(docker_engine_port))
+        engine_port = parse_docker_engine_port(docker_engine_port)
+        if engine_port is None:
+            return reply.set_txn_var("forbidden", 1)
+        reply = reply.set_txn_var("target_port", engine_port)
         return reply.set_txn_var("backend", "docker_engine_backend")
     return reply.set_txn_var("backend", "nextcloud_control_backend")
+
+
+def redact_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Return a copy of the headers fit for the log: credentials and cookies are replaced."""
+    return {k: "[REDACTED]" if k.lower() in REDACTED_LOG_HEADERS else v for k, v in headers.items()}
+
+
+def log_headers(message: str, headers: dict[str, str], *args: Any) -> None:
+    """Log request headers at debug level, with credentials and cookies redacted; the headers come last."""
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.debug(message, *args, redact_headers(headers))
 
 
 def parse_headers(headers_str: str) -> dict[str, str]:
@@ -790,7 +991,7 @@ async def _get_or_fetch_exapp(exapp_id: str) -> ExApp | None:
 
 async def nc_get_user(app_id: str, all_headers: dict[str, str]) -> NcUser | None:
     ext_headers = {k: v for k, v in all_headers.items() if k.lower() not in EXCLUDE_HEADERS_USER_INFO}
-    LOGGER.debug("all_headers = %s\next_headers = %s", str(all_headers), str(ext_headers))
+    log_headers("Requesting user info for ExApp '%s' with headers %s", ext_headers, app_id)
     async with _get_nc_session().get(
         USER_INFO_URL,
         headers={**ext_headers, "harp-shared-key": SHARED_KEY},
@@ -888,20 +1089,30 @@ async def delete_exapp(request: web.Request):
 ###############################################################################
 
 
+def frp_client_host(address: str) -> str:
+    """Return the host of an FRP `client_address`: "1.2.3.4:5678" or "[2001:db8::1]:5678"."""
+    if address.startswith("["):
+        return address[1:].partition("]")[0]
+    host, separator, _ = address.rpartition(":")
+    return host if separator and ":" not in host else address
+
+
 async def frp_auth(request: web.Request):
     if request.method != "POST":
         raise web.HTTPBadRequest()
     try:
         json_data = await request.json()
-        client_ip = str(json_data["content"]["client_address"]).split(":")[0]
+        client_ip = frp_client_host(str(json_data["content"]["client_address"]))
     except Exception:
         raise web.HTTPBadRequest() from None
 
     if await is_ip_banned(client_ip):
         return web.json_response({"reject": True, "reject_reason": "banned"})
 
-    auth_token = json_data["content"]["metas"].get("token", "")
-    if auth_token == SHARED_KEY:
+    # frpc sends `metas: null` when no `metadatas` are configured.
+    metas = json_data["content"].get("metas")
+    auth_token = metas.get("token") if isinstance(metas, dict) else None
+    if is_shared_key(auth_token):
         return web.json_response({"reject": False, "unchange": True})
 
     await record_ip_failure(client_ip)
@@ -913,20 +1124,171 @@ async def frp_auth(request: web.Request):
 ###############################################################################
 
 
+def describe_validation_error(error: ValidationError) -> str:
+    """Summarize a pydantic error as 'field: message' pairs; the submitted values themselves are left out."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in item['loc']) or 'payload'}: {item['msg'].removeprefix('Value error, ')}"
+        for item in error.errors()
+    )
+
+
+def parse_docker_engine_port(value: str) -> int | None:
+    """Return the port of a Docker Engine the agent may talk to, or None (and log why) when the value is not one."""
+    try:
+        port = int(value)
+    except ValueError:
+        port = None
+    if port is not None and any(first <= port <= last for first, last in DOCKER_ENGINE_PORTS):
+        return port
+    # The value comes from the request: shortened and escaped, so control characters do not reach the log.
+    LOGGER.error("Invalid 'docker-engine-port' header value: %r (allowed: %s).", value[:32], DOCKER_ENGINE_PORTS_TEXT)
+    return None
+
+
 def get_docker_engine_port(request: web.Request) -> int:
     docker_engine_port_str = request.headers.get("docker-engine-port")
     if not docker_engine_port_str:
         LOGGER.error("Missing 'docker-engine-port' header.")
         raise web.HTTPBadRequest(text="Missing 'docker-engine-port' header.")
 
-    try:
-        docker_engine_port = int(docker_engine_port_str)
-        if not (0 < docker_engine_port < 65536):
-            raise ValueError("Port out of valid range") from None
-        return docker_engine_port
-    except ValueError:
-        LOGGER.error("Invalid 'docker-engine-port' header value: %s", docker_engine_port_str)
-        raise web.HTTPBadRequest(text=f"Invalid 'docker-engine-port' header value: {docker_engine_port_str}") from None
+    docker_engine_port = parse_docker_engine_port(docker_engine_port_str)
+    if docker_engine_port is None:
+        raise web.HTTPBadRequest(
+            text=f"Invalid 'docker-engine-port' header value: {docker_engine_port_str[:32]!r} "
+            f"(allowed: {DOCKER_ENGINE_PORTS_TEXT})"
+        )
+    return docker_engine_port
+
+
+def check_mount_modes(mounts: list[CreateExAppMounts], enforce: bool, container_name: str = "") -> str | None:
+    """Return why a mount mode is refused; until enforced, a mode other than 'ro' or 'rw' only logs a warning.
+
+    AppAPI stores modes such as "z" or "RO" as typed and re-sends them on every ExApp update; they have always
+    mounted read-write, so refusing them at once would leave the ExApp without a container.
+    """
+    for mount in mounts:
+        if mount.mode in ("ro", "rw"):
+            continue
+        if enforce:
+            return (
+                f"HP_EXAPP_BIND_MOUNTS_ENFORCE_ALL refuses mode '{mount.mode}' of '{mount.source}': use 'ro' or 'rw'."
+            )
+        LOGGER.warning(
+            "Bind mount of '%s'%s has mode '%s', which mounts it read-write; a later release will refuse it. Use 'ro' "
+            "or 'rw'; HP_EXAPP_BIND_MOUNTS_ENFORCE_ALL=true refuses it now.",
+            mount.source,
+            f" for '{container_name}'" if container_name else "",
+            mount.mode,
+        )
+    return None
+
+
+def check_docker_resource_limits(resource_limits: dict[str, Any]) -> str | None:
+    """Return why the limits cannot be passed to the Docker Engine, or None when they can."""
+    for limit in ("memory", "nanoCPUs"):
+        value = resource_limits.get(limit)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            return f"Payload validation error: resource_limits.{limit} must be a non-negative integer."
+    return None
+
+
+def _is_same_or_below(path: str, parent: str) -> bool:
+    return parent == "/" or path == parent or path.startswith(f"{parent}/")
+
+
+def _governing_rule(
+    path: str, mode: str, allowed: list[str], denied: list[tuple[str, bool]]
+) -> tuple[bool, str] | None:
+    """Return (is_denied, entry) for the most specific entry covering the path, or None when no entry covers it.
+
+    The entry with the longest path decides, a denied entry wins a tie, and ":rw" entries do not apply to
+    read-only mounts. This is what lets an allowed entry below a denied one permit that part of it.
+    """
+    best: tuple[tuple[int, bool], bool, str] | None = None
+    for rule_path, is_denied, rw_only in [(d, True, rw) for d, rw in denied] + [(a, False, False) for a in allowed]:
+        if (rw_only and mode == "ro") or not _is_same_or_below(path, rule_path):
+            continue
+        key = (len(rule_path), is_denied)
+        if best is None or key > best[0]:
+            best = (key, is_denied, _rule_label(rule_path, rw_only))
+    return None if best is None else (best[1], best[2])
+
+
+def _mount_refusal(
+    mount: CreateExAppMounts,
+    allowed: list[str],
+    denied: list[tuple[str, bool]],
+    warn_only: frozenset[str] = frozenset(),
+) -> str | None:
+    """Return why one bind mount is refused under these rules, or None when it is permitted.
+
+    Denied rules in `warn_only` refuse nothing, but they still count as the most specific entry, so one below an
+    enforced rule (`/var/lib/docker/volumes` below `/var/lib/docker`) keeps its part permitted.
+    """
+    covered = any(_is_same_or_below(mount.source, path) for path in allowed)
+    governing = _governing_rule(mount.source, mount.mode, allowed, denied)
+    warn_only_decides = governing is not None and governing[0] and governing[1] in warn_only
+    # Strict mode (`DENIED=/` with an allowed list): the missing allowed entry is the reason, not the root rule.
+    if allowed and not covered and (governing is None or governing[1] in ("/", "/:rw") or warn_only_decides):
+        return f"HP_EXAPP_BIND_MOUNTS_ALLOWED does not cover '{mount.source}'."
+    if governing is not None and governing[0] and not warn_only_decides:
+        return f"HP_EXAPP_BIND_MOUNTS_DENIED rule '{governing[1]}' forbids mounting '{mount.source}' ({mount.mode})."
+    for denied_path, rw_only in denied:
+        if (rw_only and mount.mode == "ro") or _rule_label(denied_path, rw_only) in warn_only:
+            continue
+        if _is_same_or_below(denied_path, mount.source):
+            return (
+                f"HP_EXAPP_BIND_MOUNTS_DENIED rule '{_rule_label(denied_path, rw_only)}' forbids mounting "
+                f"'{mount.source}' ({mount.mode}): the mount contains it."
+            )
+    return None
+
+
+def check_bind_mounts(
+    mounts: list[CreateExAppMounts],
+    disabled: bool,
+    allowed: list[str],
+    denied: list[tuple[str, bool]],
+    warn_only: frozenset[str] = frozenset(),
+    container_name: str = "",
+) -> str | None:
+    """Return why a bind mount is refused, or None when all of them are permitted.
+
+    The most specific entry covering the source decides (see `_governing_rule`); with an allowed list, a source
+    no entry covers is refused; and a denied path below the source refuses the mount, because mounting a parent
+    exposes the path as well. Denied rules listed in `warn_only` refuse nothing (see `_mount_refusal`); a mount
+    they would refuse is permitted with a warning. Paths are compared after normalization: links on the host are not
+    resolved.
+    """
+    if disabled and mounts:
+        return "HP_EXAPP_BIND_MOUNTS_DISABLED is set, so no bind mount is permitted."
+    for mount in mounts:
+        refusal = _mount_refusal(mount, allowed, denied, warn_only)
+        if refusal:
+            return refusal
+        if later := _mount_refusal(mount, allowed, denied):
+            # Offer only the changes that make the mount pass once every rule is enforced.
+            remedies = []
+            if mount.mode != "ro" and not _mount_refusal(mount.model_copy(update={"mode": "ro"}), allowed, denied):
+                remedies.append("mount it read-only")
+            if not _mount_refusal(mount, [*allowed, mount.source], denied):
+                # Setting an allowed list for the first time refuses every mount it does not cover.
+                remedies.append(
+                    "list it in HP_EXAPP_BIND_MOUNTS_ALLOWED"
+                    if allowed
+                    else "list it, together with every other host path your ExApps mount, in "
+                    "HP_EXAPP_BIND_MOUNTS_ALLOWED"
+                )
+            LOGGER.warning(
+                "Bind mount of '%s' (%s)%s is permitted for now, but a later release will refuse it: %s "
+                "To keep it, %s; HP_EXAPP_BIND_MOUNTS_ENFORCE_ALL=true refuses it now.",
+                mount.source,
+                mount.mode,
+                f" for '{container_name}'" if container_name else "",
+                later,
+                " or ".join(remedies) or "set HP_EXAPP_BIND_MOUNTS_DENIED to your own list without that rule",
+            )
+    return None
 
 
 async def docker_exapp_exists(request: web.Request):
@@ -938,7 +1300,7 @@ async def docker_exapp_exists(request: web.Request):
     try:
         payload = ExAppName.model_validate(payload_dict)
     except ValidationError as e:
-        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+        raise web.HTTPBadRequest(text=f"Payload validation error: {describe_validation_error(e)}") from None
 
     container_name = payload.exapp_container_name
     docker_api_url = f"http://{DOCKER_API_HOST}:{docker_engine_port}/containers/{container_name}/json"
@@ -1001,12 +1363,27 @@ async def docker_exapp_create(request: web.Request):
     try:
         payload = CreateExAppPayload.model_validate(payload_dict)
     except ValidationError as e:
-        LOGGER.warning("Payload validation error for /docker/exapp/create: %s", e)
-        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+        reason = describe_validation_error(e)
+        LOGGER.warning("Payload validation error for /docker/exapp/create: %s", reason)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {reason}") from None
 
     container_name = payload.exapp_container_name
     volume_name = payload.exapp_container_volume
     image_id = payload.image_id
+
+    # Checked before the volume is created, so a refused request leaves nothing behind.
+    refusal = check_bind_mounts(
+        payload.mount_points,
+        BIND_MOUNTS_DISABLED,
+        BIND_MOUNTS_ALLOWED,
+        BIND_MOUNTS_DENIED,
+        BIND_MOUNTS_WARN_ONLY,
+        container_name,
+    ) or check_mount_modes(payload.mount_points, BIND_MOUNTS_ENFORCE_ALL, container_name)
+    refusal = refusal or check_docker_resource_limits(payload.resource_limits)
+    if refusal:
+        LOGGER.warning("Refusing to create container '%s': %s", container_name, refusal)
+        raise web.HTTPBadRequest(text=refusal)
 
     container_config = {
         "Image": image_id,
@@ -1160,8 +1537,9 @@ async def docker_exapp_start(request: web.Request):
     try:
         payload = ExAppName.model_validate(payload_dict)
     except ValidationError as e:
-        LOGGER.warning("Payload validation error for /docker/exapp/start: %s", e)
-        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+        reason = describe_validation_error(e)
+        LOGGER.warning("Payload validation error for /docker/exapp/start: %s", reason)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {reason}") from None
 
     container_name = payload.exapp_container_name
     start_container_url = f"http://{DOCKER_API_HOST}:{docker_engine_port}/containers/{container_name}/start"
@@ -1224,8 +1602,9 @@ async def docker_exapp_stop(request: web.Request):
     try:
         payload = ExAppName.model_validate(payload_dict)
     except ValidationError as e:
-        LOGGER.warning("Payload validation error for /docker/exapp/stop: %s", e)
-        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+        reason = describe_validation_error(e)
+        LOGGER.warning("Payload validation error for /docker/exapp/stop: %s", reason)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {reason}") from None
 
     container_name = payload.exapp_container_name
     stop_container_url = f"http://{DOCKER_API_HOST}:{docker_engine_port}/containers/{container_name}/stop"
@@ -1288,8 +1667,9 @@ async def docker_exapp_wait_for_start(request: web.Request):
     try:
         payload = ExAppName.model_validate(payload_dict)
     except ValidationError as e:
-        LOGGER.warning("Payload validation error for /docker/exapp/wait_for_start: %s", e)
-        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+        reason = describe_validation_error(e)
+        LOGGER.warning("Payload validation error for /docker/exapp/wait_for_start: %s", reason)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {reason}") from None
 
     container_name = payload.exapp_container_name
     inspect_url = f"http://{DOCKER_API_HOST}:{docker_engine_port}/containers/{container_name}/json"
@@ -1461,8 +1841,9 @@ async def docker_exapp_remove(request: web.Request):
     try:
         payload = RemoveExAppPayload.model_validate(payload_dict)
     except ValidationError as e:
-        LOGGER.warning("Payload validation error for /docker/exapp/remove: %s", e)
-        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+        reason = describe_validation_error(e)
+        LOGGER.warning("Payload validation error for /docker/exapp/remove: %s", reason)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {reason}") from None
 
     container_name = payload.exapp_container_name
     volume_name = payload.exapp_container_volume
@@ -1602,8 +1983,9 @@ async def docker_exapp_image_remove(request: web.Request):
     try:
         payload = RemoveImagePayload.model_validate(payload_dict)
     except ValidationError as e:
-        LOGGER.warning("Payload validation error for /docker/exapp/image_remove: %s", e)
-        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+        reason = describe_validation_error(e)
+        LOGGER.warning("Payload validation error for /docker/exapp/image_remove: %s", reason)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {reason}") from None
 
     image_ref = payload.image_ref
     encoded_ref = quote(image_ref, safe="")
@@ -1723,8 +2105,9 @@ async def docker_exapp_install_certificates(request: web.Request):
     try:
         payload = InstallCertificatesPayload.model_validate(payload_dict)
     except ValidationError as e:
-        LOGGER.warning("Payload validation error for /docker/exapp/install_certificates: %s", e)
-        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+        reason = describe_validation_error(e)
+        LOGGER.warning("Payload validation error for /docker/exapp/install_certificates: %s", reason)
+        raise web.HTTPBadRequest(text=f"Payload validation error: {reason}") from None
 
     container_name = payload.exapp_container_name
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120.0)) as session:
@@ -2156,7 +2539,7 @@ async def _parse_json_payload(request: web.Request, model: type[BaseModel]) -> A
     try:
         return model.model_validate(payload_dict)
     except ValidationError as e:
-        raise web.HTTPBadRequest(text=f"Payload validation error: {e}") from None
+        raise web.HTTPBadRequest(text=f"Payload validation error: {describe_validation_error(e)}") from None
 
 
 def _k8s_error_msg(data: dict[str, Any] | None, text: str) -> str:
@@ -2613,10 +2996,8 @@ async def _k8s_resolve_exapp_upstream(app_name: str) -> tuple[str, int] | None:
     if not K8S_ENABLED or not K8S_API_SERVER or not _get_k8s_token():
         return None
 
-    try:
-        exapp = ExAppName(name=app_name)
-    except Exception:
-        return None
+    # Not validated: the lookup must keep working for ExApps whose id predates the stricter name rules.
+    exapp = ExAppName.model_construct(name=app_name)
 
     svc: dict[str, Any] | None = None
     got_k8s_error = False

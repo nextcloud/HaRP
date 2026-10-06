@@ -1,0 +1,35 @@
+name: Tests - Unit
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-unit-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-22.04
+    name: Unit tests (in the HaRP image)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build HaRP image
+        run: docker build -t harp-unit-tests .
+
+      # The tests run inside the image, so they use the Python and library versions HaRP ships with.
+      - name: Run unit tests
+        run: |
+          docker run --rm -v "$PWD":/src:ro -w /src --entrypoint sh harp-unit-tests -c \
+            "pip install --break-system-packages --root-user-action=ignore --quiet pytest==9.1.1 && python3 -m pytest tests/unit -p no:cacheprovider"
