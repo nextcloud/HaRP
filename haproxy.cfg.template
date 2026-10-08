@@ -79,6 +79,8 @@ backend ex_apps_backend
     http-request set-header EX-APP-VERSION %[var(txn.exapps.exapp_version)]
     http-request set-header AUTHORIZATION-APP-API %[var(txn.exapps.exapp_token)]
     http-request set-header AA-VERSION "32"  # TO-DO: temporary, remove it after we update all ExApps.
+    # The shared key is only meant for HaRP itself, so it is not passed on to the ExApp.
+    http-request del-header harp-shared-key
 
 backend ex_apps_backend_w_bruteforce
     mode http
@@ -90,6 +92,8 @@ backend ex_apps_backend_w_bruteforce
     http-request set-header EX-APP-VERSION %[var(txn.exapps.exapp_version)]
     http-request set-header AUTHORIZATION-APP-API %[var(txn.exapps.exapp_token)]
     http-request set-header AA-VERSION "32"  # TO-DO: temporary, remove it after we update all ExApps.
+    # The shared key is only meant for HaRP itself, so it is not passed on to the ExApp.
+    http-request del-header harp-shared-key
     filter spoe engine exapps-bruteforce-protection-spoe config /etc/haproxy/spoe-agent.conf
 
 ###############################################################################
@@ -108,6 +112,10 @@ backend docker_engine_backend
     server frp_server 127.0.0.1
     http-request set-dst-port var(txn.exapps.target_port)
     http-request set-path %[var(txn.exapps.target_path)]
+    # Neither the shared key nor AppAPI's Basic credentials (which carry the same key) are meant for the engine.
+    # These must come before the `allow` rules below, which end the processing of `http-request` rules.
+    http-request del-header harp-shared-key
+    http-request del-header authorization
 
     # docker system _ping
     http-request allow if { path,url_dec -m reg -i ^(/v[\d\.]+)?/_ping$ } METH_GET
