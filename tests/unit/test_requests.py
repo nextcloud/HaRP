@@ -3,6 +3,7 @@
 """Shared key comparison, the `docker-engine-port` header and what the endpoints answer to a refused request."""
 
 import asyncio
+import gc
 import ipaddress
 import logging
 import re
@@ -443,6 +444,41 @@ def test_an_appapi_request_with_the_shared_key_is_routed_to_the_exapp(monkeypatc
         "exapp_id": "app",
     }
     assert agent.BLACKLIST_CACHE.get("192.0.2.1", []) == []
+
+
+def unreachable_nextcloud():
+    raise OSError("Name or service not known")
+
+
+def invalid_nextcloud_answer():
+    return agent.ExApp.model_validate({"exapp_token": "", "exapp_version": "1", "host": "h", "port": "secret-value"})
+
+
+@pytest.mark.parametrize(
+    ("lookup", "reason"),
+    [
+        (unreachable_nextcloud, "OSError: Name or service not known"),
+        (invalid_nextcloud_answer, "port: Input should be a valid integer"),
+    ],
+)
+def test_a_failed_lookup_for_an_appapi_request_is_logged_once_and_the_headers_route_it(
+    monkeypatch, caplog, lookup, reason
+):
+    async def fetch(_app_id):
+        return lookup()
+
+    monkeypatch.setattr(agent, "_fetch_exapp_record", fetch)
+    with caplog.at_level(logging.WARNING, logger=agent.LOGGER.name):
+        reply = asyncio.run(
+            agent._exapps_msg(
+                "/exapps/app/heartbeat", appapi_request_headers(KEY), ipaddress.ip_address("192.0.2.1"), ""
+            )
+        )
+        gc.collect()  # asyncio logs an exception nobody retrieved when its future is collected
+    assert txn_vars(reply)["target_ip"] == "127.0.0.1"
+    assert f"Cannot look up ExApp 'app', routing this AppAPI request by its headers: {reason}" in caplog.text
+    assert "never retrieved" not in caplog.text
+    assert "secret-value" not in caplog.text
 
 
 @pytest.mark.parametrize(

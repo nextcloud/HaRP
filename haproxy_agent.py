@@ -694,7 +694,13 @@ async def _exapps_msg(
         # Use unified fetch path (cache + singleflight + K8s resolution)
         try:
             exapp_record = await _get_or_fetch_exapp(exapp_id_lower)
-        except Exception:
+        except Exception as e:
+            # The headers are enough for this request, but requests from users to the ExApp need the lookup.
+            LOGGER.warning(
+                "Cannot look up ExApp '%s', routing this AppAPI request by its headers: %.300s",
+                exapp_id,
+                describe_validation_error(e) if isinstance(e, ValidationError) else f"{type(e).__name__}: {e}",
+            )
             exapp_record = None
         if not exapp_record:
             # ExApp not in Nextcloud yet (e.g. during /init) — use headers as fallback
@@ -984,6 +990,8 @@ async def _get_or_fetch_exapp(exapp_id: str) -> ExApp | None:
     except BaseException as exc:
         if not fut.done():
             fut.set_exception(exc)
+            # Waiters re-raise it and our caller handles it; marked as retrieved, asyncio does not log it a second time.
+            fut.exception()
         raise
     finally:
         _EXAPP_INFLIGHT.pop(exapp_id, None)
