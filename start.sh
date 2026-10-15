@@ -99,13 +99,18 @@ wait_for_tcp() {
 }
 
 wait_for_http() {
-    # $1 url, $2 timeout(s), $3 interval(s)
-    url="$1"; timeout="${2:-60}"; interval="${3:-0.5}"
+    # $1 url, $2 timeout(s), $3 interval(s), $4 optional PID of the process that serves the URL
+    url="$1"; timeout="${2:-60}"; interval="${3:-0.5}"; pid="${4:-}"
     start_ts="$(date +%s)"
     while :; do
         # --noproxy: internal loopback probes must ignore any http_proxy environment.
         if curl -fsS --noproxy '*' --max-time 2 "$url" >/dev/null 2>&1; then
             return 0
+        fi
+        # A process that has exited will not become ready: stop at once instead of waiting for the timeout.
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            echo "ERROR: The process serving $url exited during startup; see the error above."
+            return 1
         fi
         now="$(date +%s)"; elapsed=$(( now - start_ts ))
         if [ "$elapsed" -ge "$timeout" ]; then
@@ -466,7 +471,8 @@ EOF
     fi
     if [ "$HP_VERBOSE_START" -eq 1 ]; then
       log "INFO: Generated ${CFG_DIR}/frpc-docker.toml:"
-      cat "${CFG_DIR}/frpc-docker.toml"
+      # The token is the shared key, so it is not printed.
+      sed 's/^metadatas\.token = .*/metadatas.token = "[REDACTED]"/' "${CFG_DIR}/frpc-docker.toml"
     fi
   else
     log "INFO: ${CFG_DIR}/frpc-docker.toml already exists. Skipping generation..."
@@ -480,7 +486,7 @@ AGENT_PID=$!
 # Wait deterministically for the agent to be ready (HTTP) and for SPOA (TCP).
 # Probe /heartbeat, not /info: /info can block on a K8s API reachability check.
 log "INFO: Waiting for HaRP Agent HTTP (GET http://127.0.0.1:8200/heartbeat) to be ready..."
-wait_for_http "http://127.0.0.1:8200/heartbeat" "$HP_WAIT_AGENT_HTTP" "$HP_WAIT_INTERVAL"
+wait_for_http "http://127.0.0.1:8200/heartbeat" "$HP_WAIT_AGENT_HTTP" "$HP_WAIT_INTERVAL" "$AGENT_PID"
 
 log "INFO: Waiting for SPOA port ${HP_SPOA_ADDRESS}..."
 wait_for_tcp "$SPOA_HOST" "$SPOA_PORT" "$HP_WAIT_SPOA" "$HP_WAIT_INTERVAL"
