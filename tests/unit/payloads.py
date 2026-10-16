@@ -8,7 +8,13 @@ DOCKER_CREATE_PAYLOAD = {
     "instance_id": "",
     "image_id": "ghcr.io/nextcloud/app-skeleton-python:latest",
     "network_mode": "host",
-    "environment_variables": ["APP_ID=app-skeleton-python", "APP_PORT=23000", "HP_FRP_PORT=8782"],
+    # An ExApp that connects through FRP gets the shared key from AppAPI (the one conftest.py sets).
+    "environment_variables": [
+        "APP_ID=app-skeleton-python",
+        "APP_PORT=23000",
+        "HP_FRP_PORT=8782",
+        "HP_SHARED_KEY=unit-test-shared-key",
+    ],
     "restart_policy": "unless-stopped",
     "compute_device": "cpu",
     "mount_points": [],

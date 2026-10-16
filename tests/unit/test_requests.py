@@ -108,7 +108,7 @@ def test_agent_endpoints_are_not_routed_by_the_port_header():
     assert app_api_request("/info", AUTH) == {"backend": "nextcloud_control_backend"}
 
 
-@pytest.mark.parametrize("headers", [{}, {"harp-shared-key": "wrong"}])
+@pytest.mark.parametrize("headers", [{}, {"harp-shared-key": "wrong"}, {"harp-shared-key": agent.EXAPP_FRP_TOKEN}])
 def test_requests_without_the_shared_key_are_unauthorized(headers):
     assert app_api_request("/info", headers) == {"unauthorized": 1}
 
@@ -191,8 +191,21 @@ def frp_login(content: dict) -> tuple[int, str]:
     return post("/frp_handler", {"version": "0.1.0", "op": "Login", "content": content}, {})
 
 
-def test_frp_login_with_the_shared_key_is_accepted():
-    status, text = frp_login({"client_address": "198.51.100.7:40000", "metas": {"token": KEY}})
+def test_the_exapp_frp_token_never_changes():
+    # ExApp containers keep the token they were deployed with, so a new derivation would lock them all out.
+    assert agent.EXAPP_FRP_TOKEN == "07ab64c523d2a112a38f7b2b0a5575b36f1a35d9d4c63c255ae5de8936b77eb2"
+
+
+def test_exapp_containers_get_the_frp_token_instead_of_the_shared_key():
+    assert agent.with_exapp_frp_token(["APP_ID=app", f"HP_SHARED_KEY={KEY}"]) == [
+        "APP_ID=app",
+        f"HP_SHARED_KEY={agent.EXAPP_FRP_TOKEN}",
+    ]
+
+
+@pytest.mark.parametrize("token", [KEY, agent.EXAPP_FRP_TOKEN])
+def test_frp_login_with_the_shared_key_or_the_exapp_token_is_accepted(token):
+    status, text = frp_login({"client_address": "198.51.100.7:40000", "metas": {"token": token}})
     assert (status, text) == (200, '{"reject": false, "unchange": true}')
     assert agent.BLACKLIST_CACHE.get("198.51.100.7", []) == []  # no failure recorded
 
@@ -407,6 +420,7 @@ def test_create_permits_a_staged_mount_and_sends_the_normalized_mounts_to_the_en
     assert "Bind mount of '/srv/data' for 'nc_app_app-skeleton-python' has mode 'z', which mounts it read-write" in (
         caplog.text
     )
+    assert sent[-1][1]["Env"][-1] == f"HP_SHARED_KEY={agent.EXAPP_FRP_TOKEN}"
     binds = [m for m in sent[-1][1]["HostConfig"]["Mounts"] if m["Type"] == "bind"]
     assert [(m["Source"], m["Readonly"]) for m in binds] == [
         ("/dev/shm", False),

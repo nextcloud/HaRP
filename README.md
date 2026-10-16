@@ -293,6 +293,8 @@ HaRP is configured via several environment variables. Here are the key variables
   - **Description:** A secret token used for authentication between services.
   - **Requirement:** Must be set at runtime. Use only one of these methods.
   - **Important:** Must contain only ASCII characters (a-z, A-Z, 0-9, and common symbols).
+  - **Note:** ExApp containers that HaRP creates do not get this key. Their `HP_SHARED_KEY` holds a token derived from it, which HaRP accepts only for the FRP login. HaRP's own FRP client and remote Docker engines keep using the key, and an `frps.toml` of your own needs no change, because the token goes through the same login check.
+  - **Upgrading:** ExApp containers created by an earlier release keep the key until their next update. If you roll HaRP back to an earlier release, the ExApps deployed by this one cannot connect, and within a few minutes their login attempts get their address banned; in host network mode that is usually also the address Nextcloud uses, so HaRP then refuses Nextcloud as well. To recover, upgrade HaRP again, or stop those ExApp containers, restart HaRP and deploy them again (by an ExApp update, or by unregistering and registering them).
 
 - **`NC_INSTANCE_URL`**
   - **Description:** The base URL of your Nextcloud instance.
