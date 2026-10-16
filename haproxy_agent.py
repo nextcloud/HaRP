@@ -699,7 +699,7 @@ async def _exapps_msg(
             LOGGER.warning(
                 "Cannot look up ExApp '%s', routing this AppAPI request by its headers: %.300s",
                 exapp_id,
-                describe_validation_error(e) if isinstance(e, ValidationError) else f"{type(e).__name__}: {e}",
+                describe_lookup_error(e),
             )
             exapp_record = None
         if not exapp_record:
@@ -985,12 +985,14 @@ async def _get_or_fetch_exapp(exapp_id: str) -> ExApp | None:
         else:
             _negative_cache_evict_expired()
             _EXAPP_NEGATIVE_CACHE[exapp_id] = time.monotonic() + _NEGATIVE_CACHE_TTL
-        fut.set_result(exapp_record)
+        if not fut.done():  # a cancelled waiter cancels the shared future as well
+            fut.set_result(exapp_record)
         return exapp_record
     except BaseException as exc:
         if not fut.done():
             fut.set_exception(exc)
-            # Waiters re-raise it and our caller handles it; marked as retrieved, asyncio does not log it a second time.
+            # Waiters get it from the future and our caller from the raise below; marked as retrieved, asyncio
+            # does not log it a second time when the future is collected.
             fut.exception()
         raise
     finally:
@@ -1138,6 +1140,15 @@ def describe_validation_error(error: ValidationError) -> str:
         f"{'.'.join(str(part) for part in item['loc']) or 'payload'}: {item['msg'].removeprefix('Value error, ')}"
         for item in error.errors()
     )
+
+
+def describe_lookup_error(error: Exception) -> str:
+    """Summarize why an ExApp lookup failed in one line; for a validation error without the values."""
+    if isinstance(error, ValidationError):
+        return describe_validation_error(error)
+    # str() of an aiohttp web exception is only its reason phrase, such as "Service Unavailable".
+    reason = error.text if isinstance(error, web.HTTPException) else str(error)
+    return f"{type(error).__name__}: {reason}" if reason else type(error).__name__
 
 
 def parse_docker_engine_port(value: str) -> int | None:
