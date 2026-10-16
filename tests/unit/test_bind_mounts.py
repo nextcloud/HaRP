@@ -105,6 +105,15 @@ def test_allowed_list(source, permitted):
     assert result is None if permitted else result == f"HP_EXAPP_BIND_MOUNTS_ALLOWED does not cover '{source}'."
 
 
+# occ stores the mode as typed; as for Docker's read-only flag, every mode except "ro" counts as read-write.
+@pytest.mark.parametrize("mode", ["z", "RO", "Ro", "ro,z", "", " ro", "ro "])
+def test_a_mode_other_than_ro_counts_as_read_write(mode):
+    assert check("/etc/passwd", mode) == (
+        f"HP_EXAPP_BIND_MOUNTS_DENIED rule '/etc:rw' forbids mounting '/etc/passwd' ({mode})."
+    )
+    assert check("/srv", mode, denied=[("/srv/config", True)]).endswith("the mount contains it.")
+
+
 def test_a_denied_entry_wins_a_tie():
     assert "rule '/var/run/docker.sock'" in check("/var/run/docker.sock", allowed=["/var/run/docker.sock"])
     assert "rule '/etc:rw'" in check("/etc/hosts", "rw", allowed=["/etc"])
@@ -169,6 +178,7 @@ FIRST_ALLOWED = "list it, together with every other host path your ExApps mount,
     ("source", "mode", "allowed", "rule", "remedy"),
     [
         ("/etc/localtime", "rw", [], "/etc:rw", f"mount it read-only or {FIRST_ALLOWED}"),
+        ("/etc/localtime", "RO", [], "/etc:rw", f"mount it read-only or {FIRST_ALLOWED}"),  # only "ro" is read-only
         ("/dev/shm", "ro", [], "/dev", FIRST_ALLOWED),
         ("/var/lib/docker/volumes/v/_data", "ro", [], "/var/lib/docker/volumes", FIRST_ALLOWED),
         # With an allowed list already set, adding the path to it is enough.

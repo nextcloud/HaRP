@@ -394,6 +394,9 @@ def test_create_permits_a_staged_mount_and_sends_the_normalized_mounts_to_the_en
         {"source": "/dev/shm/", "target": "/dev/shm"},
         {"source": "/etc//localtime", "target": "/etc/localtime", "mode": "ro"},
         {"source": "/srv/data", "target": "/data", "mode": "z"},  # an SELinux option typed into occ
+        {"source": "/srv/models", "target": "/models", "mode": "RO"},  # read-write, as it always was
+        {"source": "/srv/cache", "target": "/cache", "mode": " ro"},
+        {"source": "/srv/logs", "target": "/logs", "mode": "ro,z"},
     ]
     with caplog.at_level(logging.WARNING, logger=agent.LOGGER.name):
         status, _ = post(
@@ -409,6 +412,9 @@ def test_create_permits_a_staged_mount_and_sends_the_normalized_mounts_to_the_en
         ("/dev/shm", False),
         ("/etc/localtime", True),
         ("/srv/data", False),
+        ("/srv/models", False),
+        ("/srv/cache", False),
+        ("/srv/logs", False),
     ]
 
 
@@ -446,6 +452,20 @@ def test_an_appapi_request_with_the_shared_key_is_routed_to_the_exapp(monkeypatc
     assert agent.BLACKLIST_CACHE.get("192.0.2.1", []) == []
 
 
+def appapi_requests(count: int = 1) -> list[AckPayload]:
+    async def send():
+        return await asyncio.gather(
+            *(
+                agent._exapps_msg(
+                    "/exapps/app/heartbeat", appapi_request_headers(KEY), ipaddress.ip_address("192.0.2.1"), ""
+                )
+                for _ in range(count)
+            )
+        )
+
+    return asyncio.run(send())
+
+
 def unreachable_nextcloud():
     raise OSError("Name or service not known")
 
@@ -454,11 +474,24 @@ def invalid_nextcloud_answer():
     return agent.ExApp.model_validate({"exapp_token": "", "exapp_version": "1", "host": "h", "port": "secret-value"})
 
 
+def kubernetes_api_error():
+    raise web.HTTPServiceUnavailable(text="K8s API error during Service lookup for 'app'")
+
+
+def total_timeout():
+    raise TimeoutError
+
+
+LOOKUP_FAILED = "Cannot look up ExApp 'app', routing this AppAPI request by its headers: "
+
+
 @pytest.mark.parametrize(
     ("lookup", "reason"),
     [
         (unreachable_nextcloud, "OSError: Name or service not known"),
-        (invalid_nextcloud_answer, "port: Input should be a valid integer"),
+        (invalid_nextcloud_answer, "port: Input should be a valid integer, unable to parse string as an integer"),
+        (kubernetes_api_error, "HTTPServiceUnavailable: K8s API error during Service lookup for 'app'"),
+        (total_timeout, "TimeoutError"),
     ],
 )
 def test_a_failed_lookup_for_an_appapi_request_is_logged_once_and_the_headers_route_it(
@@ -469,16 +502,57 @@ def test_a_failed_lookup_for_an_appapi_request_is_logged_once_and_the_headers_ro
 
     monkeypatch.setattr(agent, "_fetch_exapp_record", fetch)
     with caplog.at_level(logging.WARNING, logger=agent.LOGGER.name):
-        reply = asyncio.run(
-            agent._exapps_msg(
-                "/exapps/app/heartbeat", appapi_request_headers(KEY), ipaddress.ip_address("192.0.2.1"), ""
-            )
-        )
+        [reply] = appapi_requests()
         gc.collect()  # asyncio logs an exception nobody retrieved when its future is collected
     assert txn_vars(reply)["target_ip"] == "127.0.0.1"
-    assert f"Cannot look up ExApp 'app', routing this AppAPI request by its headers: {reason}" in caplog.text
-    assert "never retrieved" not in caplog.text
-    assert "secret-value" not in caplog.text
+    assert caplog.messages == [LOOKUP_FAILED + reason]
+
+
+@pytest.mark.parametrize("record", [None, agent.ExApp(exapp_token="", exapp_version="1", host="127.0.0.1", port=23000)])
+def test_a_lookup_that_succeeds_or_finds_no_exapp_logs_nothing(monkeypatch, caplog, record):
+    async def fetch(_app_id):
+        return record
+
+    monkeypatch.setattr(agent, "_fetch_exapp_record", fetch)
+    with caplog.at_level(logging.WARNING, logger=agent.LOGGER.name):
+        [reply] = appapi_requests()
+    assert txn_vars(reply)["target_ip"] == "127.0.0.1"
+    assert caplog.text == ""
+
+
+def test_concurrent_appapi_requests_share_one_failed_lookup(monkeypatch, caplog):
+    fetches = []
+
+    async def fetch(app_id):
+        fetches.append(app_id)
+        await asyncio.sleep(0.01)
+        raise OSError("Name or service not known")
+
+    monkeypatch.setattr(agent, "_fetch_exapp_record", fetch)
+    with caplog.at_level(logging.WARNING, logger=agent.LOGGER.name):
+        replies = appapi_requests(20)
+        gc.collect()
+    assert fetches == ["app"]
+    assert {txn_vars(reply)["target_ip"] for reply in replies} == {"127.0.0.1"}
+    assert caplog.messages == [LOOKUP_FAILED + "OSError: Name or service not known"] * 20  # one per request
+
+
+def test_a_cancelled_waiter_leaves_the_shared_lookup_intact(monkeypatch):
+    async def fetch(_app_id):
+        await asyncio.sleep(0.01)
+        return agent.ExApp(exapp_token="", exapp_version="1", host="127.0.0.1", port=23000)
+
+    async def lookups():
+        leader = asyncio.ensure_future(agent._get_or_fetch_exapp("app"))
+        await asyncio.sleep(0)
+        waiter = asyncio.ensure_future(agent._get_or_fetch_exapp("app"))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        return await leader
+
+    monkeypatch.setattr(agent, "_fetch_exapp_record", fetch)
+    assert asyncio.run(lookups()).host == "127.0.0.1"
+    assert agent.EXAPP_CACHE["app"].host == "127.0.0.1"
 
 
 @pytest.mark.parametrize(
@@ -513,7 +587,7 @@ def test_invalid_answers_from_nextcloud_are_logged_without_their_values(
     assert "secret-value" not in caplog.text
 
 
-@pytest.mark.parametrize("mode", ["z", "RO", "ro,z", ""])
+@pytest.mark.parametrize("mode", ["z", "RO", "ro,z", "", " ro", "rw "])
 def test_a_mode_other_than_ro_or_rw_mounts_read_write_until_enforced(caplog, mode):
     mounts = [agent.CreateExAppMounts(source="/srv/data", target="/data", mode=mode)]
     with caplog.at_level(logging.WARNING, logger=agent.LOGGER.name):

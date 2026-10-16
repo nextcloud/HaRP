@@ -40,7 +40,7 @@ def test_name_rejected(name):
 @pytest.mark.parametrize("field", ["instance_id", "role_suffix"])
 @pytest.mark.parametrize(
     ("value", "valid"),
-    [("", True), ("_idx.1", True), ("a/b", False), ("a b", False), ("a\n", False), ("x" * 64, False)],
+    [("", True), ("_idx.1", True), ("x" * 63, True), ("a/b", False), ("a b", False), ("a\n", False), ("x" * 64, False)],
 )
 def test_name_parts(field, value, valid):
     if valid:
@@ -50,7 +50,7 @@ def test_name_parts(field, value, valid):
             agent.ExAppName(name="app", **{field: value})
 
 
-@pytest.mark.parametrize("network_mode", ["host", "bridge", "nextcloud-aio", "master_bridge", "my.net"])
+@pytest.mark.parametrize("network_mode", ["host", "bridge", "nextcloud-aio", "master_bridge", "my.net", "n" * 255])
 def test_network_mode_accepted(network_mode):
     assert create_payload(network_mode=network_mode).network_mode == network_mode
 

@@ -15,8 +15,16 @@ os.environ["HP_SHARED_KEY"] = "unit-test-shared-key"
 
 @pytest.fixture(autouse=True)
 def fresh_agent_caches():
-    """Bans, sessions and ExApp records recorded by one test must not leak into the next."""
+    """Bans, sessions, ExApp records and negative lookups recorded by one test must not leak into the next."""
     import haproxy_agent
 
-    for cache in (haproxy_agent.BLACKLIST_CACHE, haproxy_agent.SESSION_CACHE, haproxy_agent.EXAPP_CACHE):
+    for cache in (
+        haproxy_agent.BLACKLIST_CACHE,
+        haproxy_agent.SESSION_CACHE,
+        haproxy_agent.EXAPP_CACHE,
+        haproxy_agent._EXAPP_NEGATIVE_CACHE,
+    ):
         cache.clear()
+    yield
+    # A lookup removes itself from the in-flight map when it ends, so a test must not leave one behind.
+    assert haproxy_agent._EXAPP_INFLIGHT == {}
