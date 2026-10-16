@@ -47,6 +47,13 @@ APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
 # the dots themselves can be `.` or %2E (any case combination, e.g. `..`, `%2e.`, `%2E%2e`).
 DOT_DOT_SEGMENT_PATTERN = re.compile(r"(?:^|/|%2[fF])(?:\.|%2[eE]){2}(?:/|%2[fF]|$)")
 SHARED_KEY = os.environ.get("HP_SHARED_KEY")
+# ExApp containers get this token instead of the shared key (see `with_exapp_frp_token`). It is accepted only for
+# the FRP login, so an ExApp cannot use the control API. Deployed containers carry it: the derivation must not change.
+EXAPP_FRP_TOKEN = (
+    hmac.new(SHARED_KEY.encode("utf-8", "surrogatepass"), b"harp-frp-exapp-v1", hashlib.sha256).hexdigest()
+    if SHARED_KEY
+    else ""
+)
 NC_INSTANCE_URL = os.environ.get("NC_INSTANCE_URL")
 SPOA_ADDRESS = os.environ.get("HP_SPOA_ADDRESS", "127.0.0.1:9600")
 SPOA_HOST, SPOA_PORT = SPOA_ADDRESS.rsplit(":", 1)
@@ -559,6 +566,25 @@ def is_shared_key(value: Any) -> bool:
     if not SHARED_KEY or not isinstance(value, str):
         return False
     return hmac.compare_digest(value.encode("utf-8", "surrogatepass"), SHARED_KEY.encode("utf-8", "surrogatepass"))
+
+
+def is_exapp_frp_token(value: Any) -> bool:
+    """Compare a presented FRP token with the one ExApp containers get, in constant time."""
+    if not EXAPP_FRP_TOKEN or not isinstance(value, str):
+        return False
+    return hmac.compare_digest(value.encode("utf-8", "surrogatepass"), EXAPP_FRP_TOKEN.encode())
+
+
+def with_exapp_frp_token(environment: list[str]) -> list[str]:
+    """Replace the shared key that AppAPI gives an ExApp as `HP_SHARED_KEY` with the ExApp FRP token.
+
+    ExApps use it only as their frpc login token. Any other value is left as it is.
+    """
+    result = []
+    for entry in environment:
+        name, _, value = entry.partition("=")
+        result.append(f"{name}={EXAPP_FRP_TOKEN}" if name == "HP_SHARED_KEY" and is_shared_key(value) else entry)
+    return result
 
 
 async def record_failure_unless_trusted(
@@ -1122,7 +1148,9 @@ async def frp_auth(request: web.Request):
     # frpc sends `metas: null` when no `metadatas` are configured.
     metas = json_data["content"].get("metas")
     auth_token = metas.get("token") if isinstance(metas, dict) else None
-    if is_shared_key(auth_token):
+    # ExApps deployed by this version log in with their token; HaRP's own frpc, remote Docker engines and ExApps
+    # deployed earlier use the shared key.
+    if is_shared_key(auth_token) or is_exapp_frp_token(auth_token):
         return web.json_response({"reject": False, "unchange": True})
 
     await record_ip_failure(client_ip)
@@ -1421,7 +1449,7 @@ async def docker_exapp_create(request: web.Request):
                 "Name": payload.restart_policy,
             },
         },
-        "Env": payload.environment_variables,
+        "Env": with_exapp_frp_token(payload.environment_variables),
     }
     if payload.network_mode not in ("host", "bridge"):
         container_config["NetworkingConfig"] = {"EndpointsConfig": {payload.network_mode: {"Aliases": [payload.name]}}}
