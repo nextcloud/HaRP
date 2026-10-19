@@ -3706,8 +3706,26 @@ async def k8s_exapp_expose(request: web.Request):
 ###############################################################################
 
 
+# Paths of the agent's HTTP port that answer without the shared key: the health check and the FRP server's login hook.
+AGENT_PATHS_WITHOUT_KEY = frozenset({"/heartbeat", "/frp_handler"})
+
+
+@web.middleware
+async def require_shared_key(request: web.Request, handler):
+    """Refuse requests to the agent's port that do not carry the shared key.
+
+    HAProxy checks the key before it forwards a request here, but every process in HaRP's network namespace can reach
+    the port directly, such as ExApps when HaRP runs with host networking. No failure is recorded: such a request
+    comes from the same address as HaRP's own callers, so a ban would lock them out.
+    """
+    if request.path not in AGENT_PATHS_WITHOUT_KEY and not is_shared_key(request.headers.get("harp-shared-key")):
+        LOGGER.warning("Refused a request to %r on the agent's port without the shared key.", request.path[:64])
+        raise web.HTTPUnauthorized()
+    return await handler(request)
+
+
 def create_web_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[require_shared_key])
 
     app.router.add_get("/heartbeat", get_heartbeat)
     app.router.add_get("/info", get_info)

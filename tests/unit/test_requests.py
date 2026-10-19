@@ -29,13 +29,20 @@ def app_api_request(path: str, headers: dict) -> dict:
     return txn_vars(asyncio.run(agent.handle_app_api_request(path, headers, "192.0.2.1", AckPayload())))
 
 
-def post(path: str, payload: dict, headers: dict) -> tuple[int, str]:
+def agent_request(method: str, path: str, payload: dict | None, headers: dict) -> tuple[int, str]:
+    """Send a request to the agent's HTTP port with exactly these headers."""
+
     async def run() -> tuple[int, str]:
         async with TestClient(TestServer(agent.create_web_app())) as client:
-            response = await client.post(path, json=payload, headers=headers)
+            response = await client.request(method, path, json=payload, headers=headers)
             return response.status, await response.text()
 
     return asyncio.run(run())
+
+
+def post(path: str, payload: dict, headers: dict) -> tuple[int, str]:
+    """POST to the agent's HTTP port as HAProxy forwards a request from AppAPI: with the shared key."""
+    return agent_request("POST", path, payload, {**AUTH, **headers})
 
 
 @pytest.fixture
@@ -113,6 +120,28 @@ def test_requests_without_the_shared_key_are_unauthorized(headers):
     assert app_api_request("/info", headers) == {"unauthorized": 1}
 
 
+def routes_that_need_the_key() -> list[tuple[str, str]]:
+    """Every route of the agent's HTTP port, apart from the health check and the FRP login hook."""
+    routes = {
+        (route.method, route.resource.canonical.replace("{app_id}", "app"))
+        for route in agent.create_web_app().router.routes()
+        if route.method != "HEAD"
+    }
+    return sorted(routes - {("GET", "/heartbeat"), ("POST", "/frp_handler")})
+
+
+@pytest.mark.parametrize("headers", [{}, {"harp-shared-key": "wrong"}, {"harp-shared-key": agent.EXAPP_FRP_TOKEN}])
+@pytest.mark.parametrize(("method", "path"), routes_that_need_the_key())
+def test_the_agent_port_refuses_requests_without_the_shared_key(no_docker_engine, headers, method, path):
+    # A process that reaches the port directly, bypassing HAProxy, such as an ExApp next to a host-network HaRP.
+    assert agent_request(method, path, None, {**headers, "docker-engine-port": "24000"})[0] == 401
+    assert agent.BLACKLIST_CACHE == {}  # its address is also the one of HaRP's own callers
+
+
+def test_the_agent_port_answers_the_health_check_without_the_shared_key():
+    assert agent_request("GET", "/heartbeat", None, {})[0] == 200
+
+
 @pytest.mark.parametrize(
     ("mount", "reason"),
     [
@@ -188,7 +217,10 @@ def test_session_log_lines_have_no_cookie_value(caplog):
 
 
 def frp_login(content: dict) -> tuple[int, str]:
-    return post("/frp_handler", {"version": "0.1.0", "op": "Login", "content": content}, {})
+    # The FRP server calls the login hook like this: without the shared key, and with the operation in the query.
+    return agent_request(
+        "POST", "/frp_handler?version=0.1.0&op=Login", {"version": "0.1.0", "op": "Login", "content": content}, {}
+    )
 
 
 def test_the_exapp_frp_token_never_changes():

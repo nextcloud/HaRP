@@ -71,6 +71,8 @@ docker run \
   -d ghcr.io/nextcloud/nextcloud-appapi-harp:release
 ```
 
+> **Note:** With host networking, HaRP's internal ports are on the host's loopback interface, and every process on the host can use them: the agent (`127.0.0.1:8200`), its SPOE port (`127.0.0.1:9600`) and the FRP tunnels (`127.0.0.1:23000-24099`). That includes ExApps with host networking, the default of the `HaRP Proxy (Host)` daemon template and of `occ app_api:daemon:register`. The agent's port requires the shared key (apart from its health check and the FRP login hook), but the SPOE port and the Docker Engine tunnels do not, and `127.0.0.1:24000` controls the Docker Engine like its socket. If your ExApps use host networking, prefer the bridge deployment above. When you move an existing HaRP to it, set `HP_EXAPPS_ADDRESS` back to `0.0.0.0:8780` (with a host address or `127.0.0.1` the published port cannot be reached, while the health check still passes), publish ports 8780 and 8782, set `NC_INSTANCE_URL` to an address the container can reach (not `localhost`), and in `HP_TRUSTED_PROXY_IPS` replace `127.0.0.1` with the Docker bridge gateway.
+
 > **Warning:** Do not forget to change the **HP_SHARED_KEY** value to a secure one!
 
 #### Advanced Docker Deployment with Nextcloud and Docker Host behind Apache Reverse Proxy
@@ -254,11 +256,9 @@ curl -fsS \
   http://<IP_host2_docker>:8780/exapps/app_api/v1.41/_ping
 ```
 
+Through the public URL, the same request without the key should get `401`, which shows that your reverse proxy forwards `/exapps/` to HaRP. Each `401` counts as a failed attempt against the address HaRP sees: yours if `HP_TRUSTED_PROXY_IPS` lists the proxy, otherwise the proxy's, which on a single host is often Nextcloud's. After 10 within 5 minutes HaRP drops every request from that address, Nextcloud's included, so run it only once:
 ```
-curl -fsS \
-  -H "harp-shared-key: some_very_secure_password" \
-  -H "docker-engine-port: 24000" \
-  https://cloud.acme.com/exapps/app_api/v1.41/_ping
+curl -sS -o /dev/null -w '%{http_code}\n' https://cloud.acme.com/exapps/app_api/v1.41/_ping
 ```
 
 
@@ -871,7 +871,7 @@ These checks run **inside the HaRP container** (e.g., `docker exec -it appapi-ha
    # Expected: OK
    ```
 
-   > **Note:** Do NOT test against port 8200 directly (e.g., `curl http://127.0.0.1:8200/_ping`). Port 8200 is the internal control API and does not handle Docker API requests.
+   > **Note:** Do NOT test against port 8200 directly (e.g., `curl http://127.0.0.1:8200/_ping`). Port 8200 is the internal control API and does not handle Docker API requests; without the shared key it answers `401` to everything except `/heartbeat` and the FRP login hook.
 
 ### Verify that the Reverse Proxy configuration is correct
 
