@@ -29,7 +29,8 @@ jobs:
         run: docker build -t harp-unit-tests .
 
       # The tests run inside the image, so they use the Python and library versions HaRP ships with.
+      # pip is not part of the image, so it is added for this run only.
       - name: Run unit tests
         run: |
           docker run --rm -v "$PWD":/src:ro -w /src --entrypoint sh harp-unit-tests -c \
-            "pip install --break-system-packages --root-user-action=ignore --quiet pytest==9.1.1 && python3 -m pytest tests/unit -p no:cacheprovider"
+            "apk add --no-cache --quiet py3-pip && pip install --break-system-packages --root-user-action=ignore --quiet pytest==9.1.1 && python3 -m pytest tests/unit -p no:cacheprovider"
