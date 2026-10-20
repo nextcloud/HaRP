@@ -55,10 +55,30 @@ RUN set -ex; \
         curl \
         openssl \
         envsubst \
-        frp \
         python3 \
         netcat-openbsd; \
     chmod -R 777 /tmp;
+
+# frps and frpc from the official frp release, checked against the release's frp_sha256_checksums.txt.
+# Alpine packages frp with a delay. Bump the version and both checksums together.
+ARG FRP_VERSION=0.71.1
+ARG FRP_AMD64_SHA256=1d9875210972a5d1a62b2dc4c48df45ab0af05d3ca1b5e494a014428259df803
+ARG FRP_ARM64_SHA256=8edf590b0c396fa42f9c147121a76af83cfc2002b08f5aef0ea1008c43482019
+RUN set -ex; \
+    case "$(apk --print-arch)" in \
+        x86_64) FRP_ARCH=amd64; FRP_SHA256="${FRP_AMD64_SHA256}" ;; \
+        aarch64) FRP_ARCH=arm64; FRP_SHA256="${FRP_ARM64_SHA256}" ;; \
+        *) echo "No FRP release configured for $(apk --print-arch)"; exit 1 ;; \
+    esac; \
+    FRP_DIR="frp_${FRP_VERSION}_linux_${FRP_ARCH}"; \
+    curl -fsSL -o /tmp/frp.tar.gz "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/${FRP_DIR}.tar.gz"; \
+    echo "${FRP_SHA256}  /tmp/frp.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/frp.tar.gz -C /tmp; \
+    install -m 755 "/tmp/${FRP_DIR}/frps" "/tmp/${FRP_DIR}/frpc" /usr/local/bin/; \
+    install -Dm644 "/tmp/${FRP_DIR}/LICENSE" /usr/share/licenses/frp/LICENSE; \
+    rm -rf /tmp/frp.tar.gz "/tmp/${FRP_DIR}"; \
+    frps --version; \
+    frpc --version
 
 # Install the Python packages pinned in requirements.txt; git and pip are only needed for this step.
 # aiohttp comes from PyPI because Alpine packages it with a delay; Brotli keeps the
