@@ -774,7 +774,7 @@ docker run \
 ##### One time initializing steps:
 
 1. Create virtual environment
-2. Install `pydantic` (you can look at exact version in the **Dockerfile*) and `git+https://github.com/cloud-py-api/haproxy-python-spoa.git`
+2. Install the packages from `requirements.txt` (`pip install -r requirements.txt`) and `git+https://github.com/cloud-py-api/haproxy-python-spoa.git` (the commit pinned in the **Dockerfile**)
 3. Set next environment variables for running `haproxy_agent.py` script:
     ```
     HP_LOG_LEVEL=info;NC_INSTANCE_URL=http://nextcloud.local;HP_SHARED_KEY=some_very_secure_password;HP_FRP_DISABLE_TLS=true

@@ -30,6 +30,23 @@ updates:
           - "version-update:semver-major"
           - "version-update:semver-minor"
 
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: saturday
+      time: "03:00"
+      timezone: Europe/Paris
+    # Same as for the base image: these are the agent's runtime packages.
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 5
+    # One PR for all Python packages, because their versions depend on each other.
+    groups:
+      python-packages:
+        patterns:
+          - "*"
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

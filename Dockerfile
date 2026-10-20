@@ -57,19 +57,25 @@ RUN set -ex; \
         envsubst \
         frp \
         python3 \
-        py3-aiohttp \
         netcat-openbsd; \
     chmod -R 777 /tmp;
 
-# Install the Python SPOA library; git and pip are only needed for this step.
-# Pinned to a commit: the single-write frame emission it contains is required for
-# HAProxy 3.2+ (we run 3.4 LTS), whose SPOP mux resets connections when a frame
-# arrives split across TCP segments. Bump this deliberately together with the library.
+# Install the Python packages pinned in requirements.txt; git and pip are only needed for this step.
+# aiohttp comes from PyPI because Alpine packages it with a delay; Brotli keeps the
+# `br` content encoding that the Alpine package also brought in.
+# The SPOA library is pinned to a commit: the single-write frame emission it contains is
+# required for HAProxy 3.2+ (we run 3.4 LTS), whose SPOP mux resets connections when a
+# frame arrives split across TCP segments. Bump this deliberately together with the library.
+# The import check fails the build if pip fell back to a pure-Python wheel for a package
+# whose compiled extension we rely on.
+COPY requirements.txt /tmp/requirements.txt
 RUN set -ex; \
     apk add --no-cache --virtual .build-deps git py3-pip; \
     PIP_NO_CACHE_DIR=1 pip install --break-system-packages \
-        pydantic==2.13.4 \
+        -r /tmp/requirements.txt \
         git+https://github.com/cloud-py-api/haproxy-python-spoa.git@f00f3f7b1b0f56e10052af6c0d07e81c5195d84d; \
+    python3 -c 'import aiohttp._http_parser, aiohttp._http_writer, frozenlist._frozenlist, multidict._multidict, propcache._helpers_c, yarl._quoting_c'; \
+    rm /tmp/requirements.txt; \
     apk del --no-cache .build-deps
 
 # Copy our scripts and templates
