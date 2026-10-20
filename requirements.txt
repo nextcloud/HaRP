@@ -14,7 +14,7 @@ frozenlist==1.8.0
 idna==3.20
 multidict==7.1.0
 propcache==0.5.4
-pydantic==2.13.4
+pydantic==2.14.1
 typing-extensions==4.16.0
 typing-inspection==0.4.4
 yarl==1.25.1
