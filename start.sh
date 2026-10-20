@@ -82,12 +82,18 @@ strip_quotes() {
 }
 
 wait_for_tcp() {
-    # $1 host, $2 port, $3 timeout(s), $4 interval(s)
-    host="$1"; port="$2"; timeout="${3:-30}"; interval="${4:-0.5}"
+    # $1 host, $2 port, $3 timeout(s), $4 interval(s), $5 optional PID of the process that should listen
+    host="$1"; port="$2"; timeout="${3:-30}"; interval="${4:-0.5}"; pid="${5:-}"
     start_ts="$(date +%s)"
     while :; do
         if nc -z -w 1 "$host" "$port" >/dev/null 2>&1; then
             return 0
+        fi
+        # A process that has exited will not start listening: stop at once instead of waiting for the timeout.
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            status=0; wait "$pid" 2>/dev/null || status=$?
+            echo "ERROR: The process that should listen on $host:$port exited during startup (status $status); see the error above."
+            return 1
         fi
         now="$(date +%s)"; elapsed=$(( now - start_ts ))
         if [ "$elapsed" -ge "$timeout" ]; then
@@ -109,7 +115,8 @@ wait_for_http() {
         fi
         # A process that has exited will not become ready: stop at once instead of waiting for the timeout.
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-            echo "ERROR: The process serving $url exited during startup; see the error above."
+            status=0; wait "$pid" 2>/dev/null || status=$?
+            echo "ERROR: The process serving $url exited during startup (status $status); see the error above."
             return 1
         fi
         now="$(date +%s)"; elapsed=$(( now - start_ts ))
@@ -489,7 +496,7 @@ log "INFO: Waiting for HaRP Agent HTTP (GET http://127.0.0.1:8200/heartbeat) to 
 wait_for_http "http://127.0.0.1:8200/heartbeat" "$HP_WAIT_AGENT_HTTP" "$HP_WAIT_INTERVAL" "$AGENT_PID"
 
 log "INFO: Waiting for SPOA port ${HP_SPOA_ADDRESS}..."
-wait_for_tcp "$SPOA_HOST" "$SPOA_PORT" "$HP_WAIT_SPOA" "$HP_WAIT_INTERVAL"
+wait_for_tcp "$SPOA_HOST" "$SPOA_PORT" "$HP_WAIT_SPOA" "$HP_WAIT_INTERVAL" "$AGENT_PID"
 
 log "INFO: Starting FRP server on ${HP_FRP_ADDRESS}..."
 frps -c "${CFG_DIR}/frps.toml" &
@@ -499,7 +506,7 @@ FRPS_PID=$!
 LOCAL_FRP_HOST="$FRP_HOST"
 [ "$LOCAL_FRP_HOST" = "0.0.0.0" ] && LOCAL_FRP_HOST="127.0.0.1"
 log "INFO: Waiting for FRP server port ${LOCAL_FRP_HOST}:${FRP_PORT}..."
-wait_for_tcp "$LOCAL_FRP_HOST" "$FRP_PORT" "$HP_WAIT_FRP" "$HP_WAIT_INTERVAL"
+wait_for_tcp "$LOCAL_FRP_HOST" "$FRP_PORT" "$HP_WAIT_FRP" "$HP_WAIT_INTERVAL" "$FRPS_PID"
 
 FRPC_PID=""
 if [ -e "/var/run/docker.sock" ]; then
