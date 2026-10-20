@@ -1,0 +1,55 @@
+version: 2
+updates:
+  - package-ecosystem: docker
+    directories:
+      - "/"
+      - "/development/debugging"
+    schedule:
+      interval: weekly
+      day: saturday
+      time: "03:00"
+      timezone: Europe/Paris
+    # Shorter than for Actions: base image patch releases carry HAProxy and Alpine fixes.
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for both Dockerfiles.
+      haproxy-base-image:
+        patterns:
+          - "*haproxy"
+    ignore:
+      # Patch releases of the current HAProxy LTS branch only. A move to the next LTS branch
+      # (even minors: 3.4, 3.6, ...) is done by hand, because a minor bump can change SPOP mux
+      # behaviour that the pinned haproxy-python-spoa commit compensates for.
+      # Only tags with the same -alpineX.Y suffix are offered. When the haproxy image moves to
+      # a newer Alpine release (about every six months), Dependabot stops offering 3.4.x patches
+      # until the suffix is bumped by hand in both Dockerfiles.
+      - dependency-name: "*haproxy"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: saturday
+      time: "03:00"
+      timezone: Europe/Paris
+    cooldown:
+      default-days: 10
+    open-pull-requests-limit: 5
+    # Major versions get their own PR, so one breaking major does not hold back the rest.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      github-actions-major:
+        patterns:
+          - "*"
+        update-types:
+          - major
