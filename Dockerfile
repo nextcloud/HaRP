@@ -23,7 +23,7 @@
 #  - HP_SHARED_KEY or HP_SHARED_KEY_FILE must be provided at runtime.
 # -------------------------------------------------------------------------
 
-FROM docker.io/library/haproxy:3.4.4-alpine3.24
+FROM docker.io/library/haproxy:3.4.7-alpine3.24
 
 USER root
 
@@ -44,34 +44,33 @@ ENV HP_EXAPPS_ADDRESS="0.0.0.0:8780" \
 # NOTE: We do NOT define HP_SHARED_KEY or HP_SHARED_KEY_FILE here
 # because they must be provided at runtime for security reasons.
 
+# Only what start.sh, healthcheck.sh and the agent use at runtime.
+# `apk upgrade` also brings the packages of the base image up to date.
 RUN set -ex; \
+    apk upgrade --no-cache; \
     apk add --no-cache \
-        git \
         ca-certificates \
         tzdata \
         bash \
         curl \
         openssl \
-        bind-tools \
-        nano \
-        vim \
         envsubst \
         frp \
         python3 \
-        py3-pip \
         py3-aiohttp \
-        wget \
-        tar \
         netcat-openbsd; \
     chmod -R 777 /tmp;
 
-# Install the Python SPOA library.
+# Install the Python SPOA library; git and pip are only needed for this step.
 # Pinned to a commit: the single-write frame emission it contains is required for
 # HAProxy 3.2+ (we run 3.4 LTS), whose SPOP mux resets connections when a frame
 # arrives split across TCP segments. Bump this deliberately together with the library.
-RUN pip install --break-system-packages \
+RUN set -ex; \
+    apk add --no-cache --virtual .build-deps git py3-pip; \
+    PIP_NO_CACHE_DIR=1 pip install --break-system-packages \
         pydantic==2.13.4 \
-        git+https://github.com/cloud-py-api/haproxy-python-spoa.git@f00f3f7b1b0f56e10052af6c0d07e81c5195d84d
+        git+https://github.com/cloud-py-api/haproxy-python-spoa.git@f00f3f7b1b0f56e10052af6c0d07e81c5195d84d; \
+    apk del --no-cache .build-deps
 
 # Copy our scripts and templates
 COPY --chmod=755 healthcheck.sh /healthcheck.sh
