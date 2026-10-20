@@ -229,6 +229,7 @@ SPOA_PORT="$(echo "$HP_SPOA_ADDRESS" | cut -d':' -f2)"
 # ----------------------------------------------------------------------------
 # Map HP_LOG_LEVEL (our user-friendly strings) to valid HAProxy log levels
 # ----------------------------------------------------------------------------
+HP_LOG_LEVEL="$(echo "${HP_LOG_LEVEL}" | tr '[:upper:]' '[:lower:]')"
 case "${HP_LOG_LEVEL}" in
   debug)
     HP_LOG_LEVEL_HAPROXY="debug"
@@ -244,11 +245,13 @@ case "${HP_LOG_LEVEL}" in
     ;;
   *)
     echo "WARNING: Unrecognized HP_LOG_LEVEL='${HP_LOG_LEVEL}', defaulting to 'warning'"
+    HP_LOG_LEVEL="warning"
     HP_LOG_LEVEL_HAPROXY="warning"
     ;;
 esac
 
-export HP_LOG_LEVEL_HAPROXY
+# The agent reads HP_LOG_LEVEL too.
+export HP_LOG_LEVEL HP_LOG_LEVEL_HAPROXY
 
 # ----------------------------------------------------------------------------
 # Generate self-signed certs for FRP unless HP_FRP_DISABLE_TLS=true
