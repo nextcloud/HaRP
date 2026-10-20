@@ -442,7 +442,7 @@ For remote or external Docker Engines - or if you prefer not to mount the Docker
      -v /var/run/docker.sock:/var/run/docker.sock \
      --restart unless-stopped \
      -d --name harp_frpc_docker \
-     -- ghcr.io/fatedier/frpc:v0.61.1 "-c=/etc/frpc.toml"
+     -- ghcr.io/fatedier/frpc:v0.71.1 "-c=/etc/frpc.toml"
    ```
 
    Or with docker compose:
@@ -450,7 +450,7 @@ For remote or external Docker Engines - or if you prefer not to mount the Docker
    ```yaml
    services:
      harp_frpc_docker:
-       image: ghcr.io/fatedier/frpc:v0.61.1
+       image: ghcr.io/fatedier/frpc:v0.71.1
        container_name: harp_frpc_docker
        volumes:
          - ./frpc.toml:/etc/frpc.toml
@@ -680,9 +680,9 @@ image has to be present on every node that can run the pod.
     ```dockerfile
     # Download and install FRP client with checksum verification
     # FRP version and checksums - update these when upgrading
-    ARG FRP_VERSION=0.61.1
-    ARG FRP_AMD64_SHA256=bff260b68ca7b1461182a46c4f34e9709ba32764eed30a15dd94ac97f50a2c40
-    ARG FRP_ARM64_SHA256=af6366f2b43920ebfe6235dba6060770399ed1fb18601e5818552bd46a7621f8
+    ARG FRP_VERSION=0.71.1
+    ARG FRP_AMD64_SHA256=1d9875210972a5d1a62b2dc4c48df45ab0af05d3ca1b5e494a014428259df803
+    ARG FRP_ARM64_SHA256=8edf590b0c396fa42f9c147121a76af83cfc2002b08f5aef0ea1008c43482019
 
     RUN set -ex; \
         ARCH=$(uname -m); \
@@ -712,7 +712,7 @@ image has to be present on every node that can run the pod.
 
     > **Note:** The checksums are verified against the official FRP releases to prevent supply chain attacks. When upgrading FRP, update both the version and checksums from the [FRP releases page](https://github.com/fatedier/frp/releases).
 
-    > **Note:** For `Alpine 3.21` Linux you can just install `FRP` from repo using `apk add frp` command.
+    > **Note:** On Alpine Linux, `apk add frp` also installs the FRP client, but the Alpine package can be several releases behind the version above.
 
 That's it! Your ExApp is now adapted to Nextcloud 32.
 
