@@ -550,14 +550,16 @@ if [ "$HP_WATCHDOG_ENABLED" = "true" ]; then
 fi
 
 # A trapped signal (e.g. the HUP reload above) interrupts `wait -n` with status > 128,
-# so keep waiting until one of the supervised processes is actually gone.
+# so keep waiting until one of the supervised processes is actually gone. Look before the
+# first `wait -n` too: bash reports a child killed by a signal during the startup waits
+# ("Killed") and forgets it, so `wait -n` would never return for it.
 dead=""
-while [ -z "$dead" ]; do
-    wait -n
-    rc=$?
+while :; do
     for entry in "haproxy:$HAPROXY_PID" "agent:$AGENT_PID" "frps:$FRPS_PID" ${FRPC_PID:+"frpc:$FRPC_PID"} ${WATCHDOG_PID:+"watchdog:$WATCHDOG_PID"}; do
-        kill -0 "${entry#*:}" 2>/dev/null || { dead="${entry%%:*}"; break; }
+        kill -0 "${entry#*:}" 2>/dev/null || { dead="${entry%%:*}"; wait "${entry#*:}" 2>/dev/null; rc=$?; break; }
     done
+    [ -n "$dead" ] && break
+    wait -n
 done
 echo "ERROR: HaRP process '${dead}' exited unexpectedly (status ${rc}), stopping the container."
 [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
