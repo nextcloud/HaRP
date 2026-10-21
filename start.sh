@@ -354,6 +354,12 @@ fi
 if [ -f "${CFG_DIR}/haproxy.cfg" ]; then
   log "INFO: ${CFG_DIR}/haproxy.cfg already present. Skipping config generation..."
 else
+  # Checked before the config is written, so a failed start leaves none for a restart to reuse.
+  if [ -f "/certs/cert.pem" ] && [ ! -r "/certs/cert.pem" ]; then
+    echo "ERROR: /certs/cert.pem is not readable by uid $(id -u); make it readable, or remove it to disable the HTTPS frontend."
+    exit 1
+  fi
+
   log "INFO: Creating ${CFG_DIR}/haproxy.cfg from haproxy.cfg.template..."
 
   # Use envsubst to render the main configuration.
@@ -363,7 +369,6 @@ else
   if [ -f "/certs/cert.pem" ]; then
     log "INFO: Found /certs/cert.pem, HTTPS frontends remain enabled."
     sed -i "/_HTTPS_FRONTEND_/ s|_HTTPS_FRONTEND_ ||g" "${CFG_DIR}/haproxy.cfg"
-    chmod 644 /certs/cert.pem
   else
     log "INFO: No /certs/cert.pem found, disabling HTTPS frontends..."
     sed -i "/_HTTPS_FRONTEND_/ s|^|#|g" "${CFG_DIR}/haproxy.cfg"
