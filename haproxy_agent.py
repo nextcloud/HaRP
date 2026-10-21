@@ -69,10 +69,17 @@ K8S_VERIFY_SSL = os.environ.get("HP_K8S_VERIFY_SSL", "true").lower() != "false"
 K8S_STORAGE_CLASS = os.environ.get("HP_K8S_STORAGE_CLASS", "")
 K8S_DEFAULT_STORAGE_SIZE = os.environ.get("HP_K8S_DEFAULT_STORAGE_SIZE", "10Gi")
 K8S_HOST_ALIASES_RAW = os.environ.get("HP_K8S_HOST_ALIASES", "")  # "hostname:ip,hostname2:ip2"
-if not K8S_API_SERVER and os.environ.get("KUBERNETES_SERVICE_HOST"):
+
+
+def _in_cluster_api_server() -> str:
+    """The URL of the API server whose address Kubernetes sets in every pod; an IPv6 address needs brackets."""
     host = os.environ["KUBERNETES_SERVICE_HOST"]
     port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
-    K8S_API_SERVER = f"https://{host}:{port}"
+    return f"https://[{host}]:{port}" if ":" in host else f"https://{host}:{port}"
+
+
+if not K8S_API_SERVER and os.environ.get("KUBERNETES_SERVICE_HOST"):
+    K8S_API_SERVER = _in_cluster_api_server()
 
 K8S_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60.0)
 # `/info` probes the API server with its own short timeout: AppAPI waits 5 s for `/info` in its daemon checks, so a

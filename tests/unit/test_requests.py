@@ -664,6 +664,16 @@ def test_create_refuses_an_unknown_mode_once_enforced(no_docker_engine, monkeypa
     )
 
 
+@pytest.mark.parametrize(
+    ("host", "url"),
+    [("10.96.0.1", "https://10.96.0.1:443"), ("fd00:10:96::1", "https://[fd00:10:96::1]:443")],
+)
+def test_in_cluster_api_server_url(monkeypatch, host, url):
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", host)
+    monkeypatch.setenv("KUBERNETES_SERVICE_PORT", "443")
+    assert agent._in_cluster_api_server() == url
+
+
 def test_k8s_service_lookup_works_for_any_app_id(monkeypatch):
     calls = []
 
