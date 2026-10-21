@@ -137,7 +137,10 @@ _shutdown() {
     # Unquoted expansions: still-unset PIDs simply disappear from the argument list.
     # shellcheck disable=SC2086
     kill -TERM ${HAPROXY_PID:-} ${AGENT_PID:-} ${FRPS_PID:-} ${FRPC_PID:-} 2>/dev/null
-    wait
+    # Explicit PIDs, not a bare `wait`: bash 5.3.9 loops forever in a bare `wait` on a
+    # child it lost track of.
+    # shellcheck disable=SC2086
+    wait ${WATCHDOG_PID:-} ${HAPROXY_PID:-} ${AGENT_PID:-} ${FRPS_PID:-} ${FRPC_PID:-} 2>/dev/null
     exit 0
 }
 # Install the stop handler before doing anything slow (certificate generation, service
@@ -550,19 +553,24 @@ if [ "$HP_WATCHDOG_ENABLED" = "true" ]; then
 fi
 
 # A trapped signal (e.g. the HUP reload above) interrupts `wait -n` with status > 128,
-# so keep waiting until one of the supervised processes is actually gone. Look before the
-# first `wait -n` too: bash reports a child killed by a signal during the startup waits
-# ("Killed") and forgets it, so `wait -n` would never return for it.
+# so keep waiting until one of the supervised processes is actually gone. Look before every
+# `wait -n` too: when a child dies of a signal such as SIGKILL or SIGSEGV, bash prints
+# "Killed" (or similar) the next time it parses a line or a `$(...)` and drops the child
+# from its job table, so `wait -n` would never return for it.
 dead=""
 while :; do
     for entry in "haproxy:$HAPROXY_PID" "agent:$AGENT_PID" "frps:$FRPS_PID" ${FRPC_PID:+"frpc:$FRPC_PID"} ${WATCHDOG_PID:+"watchdog:$WATCHDOG_PID"}; do
-        kill -0 "${entry#*:}" 2>/dev/null || { dead="${entry%%:*}"; wait "${entry#*:}" 2>/dev/null; rc=$?; break; }
+        kill -0 "${entry#*:}" 2>/dev/null || { dead="${entry%%:*}"; dead_pid="${entry#*:}"; break; }
     done
     [ -n "$dead" ] && break
     wait -n
 done
-echo "ERROR: HaRP process '${dead}' exited unexpectedly (status ${rc}), stopping the container."
 [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
 kill -TERM "$HAPROXY_PID" "$AGENT_PID" "$FRPS_PID" ${FRPC_PID:+"$FRPC_PID"} 2>/dev/null
-wait
+# Take the exit status only after the others were told to stop: if bash lost track of the
+# child (a trapped signal arrived while it was being reaped), this returns 127 once they
+# are gone instead of blocking forever.
+wait "$dead_pid" 2>/dev/null; rc=$?
+echo "ERROR: HaRP process '${dead}' exited unexpectedly (status ${rc}), stopping the container."
+wait ${WATCHDOG_PID:+"$WATCHDOG_PID"} "$HAPROXY_PID" "$AGENT_PID" "$FRPS_PID" ${FRPC_PID:+"$FRPC_PID"} 2>/dev/null
 exit 1
