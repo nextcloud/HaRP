@@ -336,7 +336,7 @@ HaRP is configured via several environment variables. Here are the key variables
 - **`HP_LOG_LEVEL`**
   - **Default:** `warning`
   - **Possible Values:** `debug`, `info`, `warning`, `error`
-  - Case, blanks and surrounding quotes do not matter; any other value falls back to `warning`.
+  - Case, blanks and surrounding quotes do not matter, and `warn` means `warning`; any other value falls back to `warning`.
 
 - **`HP_WATCHDOG_ENABLED`** / **`HP_WATCHDOG_INTERVAL`** / **`HP_WATCHDOG_FAILS`**
   - **Description:** Self-healing watchdog. Every `HP_WATCHDOG_INTERVAL` seconds the container probes the internal agent (`GET /heartbeat`); after `HP_WATCHDOG_FAILS` consecutive failures the agent is killed and the container exits so that the Docker restart policy (`--restart unless-stopped` in the examples above) brings it back in a clean state. The death of any core process (agent, frps, frpc, HAProxy) also stops the container now instead of leaving it running half-broken.
