@@ -354,11 +354,9 @@ fi
 if [ -f "${CFG_DIR}/haproxy.cfg" ]; then
   log "INFO: ${CFG_DIR}/haproxy.cfg already present. Skipping config generation..."
 else
-  # HAProxy only reads the certificate, so it may be a read-only mount (e.g. a Kubernetes Secret), and its mode
-  # is left alone as it holds the private key. Checked before the config is written: a failed start must not
-  # leave a config behind that a container restart would reuse.
+  # Checked before the config is written, so a failed start leaves none for a restart to reuse.
   if [ -f "/certs/cert.pem" ] && [ ! -r "/certs/cert.pem" ]; then
-    echo "ERROR: /certs/cert.pem is not readable by uid $(id -u) (HaRP does not change its permissions); make it readable, or remove it to disable the HTTPS frontend."
+    echo "ERROR: /certs/cert.pem is not readable by uid $(id -u); make it readable, or remove it to disable the HTTPS frontend."
     exit 1
   fi
 
