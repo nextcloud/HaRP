@@ -8,7 +8,7 @@
 #   - Checks if Python SPOE HTTP Control API is listening on 127.0.0.1:8200.
 #   - Checks if SPOE Agent is running on HP_SPOA_ADDRESS (default 127.0.0.1:9600).
 #   - Checks FRP port at HP_FRP_ADDRESS.
-#   - Checks EXAPPS HTTP frontend, and also the EXAPPS HTTPS frontend if the /certs/cert.pem file exists.
+#   - Checks EXAPPS HTTP frontend, and also the EXAPPS HTTPS frontend if haproxy.cfg defines it.
 #
 # This script returns 0 if all checks pass, 1 otherwise.
 
@@ -61,17 +61,11 @@ check_port "${HP_SPOA_ADDRESS:-127.0.0.1:9600}"
 # 4) Check FRP port
 check_port "${HP_FRP_ADDRESS:-0.0.0.0:8782}"
 
-# 5) Decide which frontends to check in HAProxy
-CERT_PRESENT=0
-if [ -f "/certs/cert.pem" ]; then
-  CERT_PRESENT=1
-fi
-
-# We always check the EXAPPS HTTP frontend
+# 5) We always check the EXAPPS HTTP frontend
 check_port "${HP_EXAPPS_ADDRESS:-0.0.0.0:8780}"
 
-# If there's a cert, we also check the EXAPPS HTTPS frontend
-if [ "$CERT_PRESENT" -eq 1 ]; then
+# The EXAPPS HTTPS frontend only if the config in use defines it
+if grep -qE '^[[:space:]]*frontend[[:space:]]+ex_apps_https([[:space:]]|$)' "${CFG_DIR}/haproxy.cfg"; then
   check_port "${HP_EXAPPS_HTTPS_ADDRESS:-0.0.0.0:8781}"
 fi
 
