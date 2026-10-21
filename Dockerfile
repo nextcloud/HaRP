@@ -105,7 +105,8 @@ COPY --chmod=775 start.sh /usr/local/bin/start.sh
 # Main haproxy config template
 COPY --chmod=664 haproxy.cfg.template /haproxy.cfg.template
 
-# SPOE config
+# SPOE config; COPY --chmod would create /etc/haproxy without the execute bit.
+RUN install -d -m 755 /etc/haproxy
 COPY --chmod=664 spoe-agent.conf /etc/haproxy/spoe-agent.conf
 
 # Python SPOE agent
