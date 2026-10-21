@@ -272,6 +272,7 @@ HaRP is configured via several environment variables. Here are the key variables
     - `HP_EXAPPS_ADDRESS="0.0.0.0:8780"`
     - `HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781"`
   - **Note:** Must be reachable by your reverse proxy.
+  - **Note:** The HTTPS frontend is enabled only when `/certs/cert.pem` exists (certificate and private key in one PEM file). HaRP only reads it and never changes its permissions, so it can be mounted read-only or come from a Kubernetes Secret; it must be readable by the user the container runs as (root by default).
 
 - **`HP_TRUSTED_PROXY_IPS`**
   - **Description:** A comma-separated list of trusted reverse proxy IP addresses or CIDR ranges. When HaRP is behind another reverse proxy (like NGINX), set this to the IP of that proxy to allow HaRP to correctly identify the true client IP from `X-Forwarded-For` or `X-Real-IP` headers.
