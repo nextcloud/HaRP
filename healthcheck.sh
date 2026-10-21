@@ -12,11 +12,11 @@
 #
 # This script returns 0 if all checks pass, 1 otherwise.
 
-# Determine config directory (same logic as start.sh)
-if [ -f "/run/harp/haproxy.cfg" ]; then
-  CFG_DIR="/run/harp"
-else
+# Determine config directory: start.sh uses /haproxy.cfg whenever it exists
+if [ -f "/haproxy.cfg" ]; then
   CFG_DIR=""
+else
+  CFG_DIR="/run/harp"
 fi
 
 # 1) Validate HAProxy config
@@ -36,7 +36,9 @@ fi
 
 # Helper: netcat a given "host:port"
 check_port () {
-  local fulladdr="$1"
+  local fulladdr
+  # Strip quotes as start.sh does
+  fulladdr="$(echo "$1" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
   # If "host" is 0.0.0.0, netcat to 127.0.0.1. Otherwise, use the given host.
   local host_part="$(echo "$fulladdr" | cut -d':' -f1)"
   local port_part="$(echo "$fulladdr" | cut -d':' -f2)"
