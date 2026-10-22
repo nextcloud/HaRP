@@ -674,6 +674,25 @@ def test_in_cluster_api_server_url(monkeypatch, host, url):
     assert agent._in_cluster_api_server() == url
 
 
+@pytest.mark.parametrize(
+    ("value", "aliases"),
+    [
+        ("nc.example.com:10.0.0.5", [{"ip": "10.0.0.5", "hostnames": ["nc.example.com"]}]),
+        ("nc.example.com:fd00::5", [{"ip": "fd00::5", "hostnames": ["nc.example.com"]}]),
+        (
+            "nc.example.com:[fd00::5], office.example.com:fd00::5,nc.example.com:10.0.0.5",
+            [
+                {"ip": "fd00::5", "hostnames": ["nc.example.com", "office.example.com"]},
+                {"ip": "10.0.0.5", "hostnames": ["nc.example.com"]},
+            ],
+        ),
+    ],
+)
+def test_k8s_host_aliases(monkeypatch, value, aliases):
+    monkeypatch.setattr(agent, "K8S_HOST_ALIASES_RAW", value)
+    assert agent._k8s_parse_host_aliases() == aliases
+
+
 def test_k8s_service_lookup_works_for_any_app_id(monkeypatch):
     calls = []
 

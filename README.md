@@ -511,7 +511,7 @@ The namespace and storage behaviour are controlled by these variables:
     - **Description:** Default size of the persistent volume claim that HaRP creates for each ExApp.
     - **Default:** `10Gi`
   - **`HP_K8S_HOST_ALIASES`**
-    - **Description:** Additional host aliases set on the ExApp pods, as a comma-separated list of `hostname:ip` pairs, e.g. `nextcloud.example.com:10.0.0.5`. Useful when your Nextcloud domain is not resolvable by the cluster DNS.
+    - **Description:** Additional host aliases set on the ExApp pods, as a comma-separated list of `hostname:ip` pairs, e.g. `nextcloud.example.com:10.0.0.5`. Useful when your Nextcloud domain is not resolvable by the cluster DNS. An IPv6 address may be written with or without brackets, e.g. `nextcloud.example.com:[fd00::5]`.
     - **Default:** empty
 
 How HaRP reaches the API server:

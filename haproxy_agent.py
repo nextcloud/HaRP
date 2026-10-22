@@ -2833,9 +2833,10 @@ def _k8s_parse_host_aliases() -> list[dict[str, Any]]:
         entry = entry.strip()
         if not entry or ":" not in entry:
             continue
-        hostname, ip_addr = entry.rsplit(":", 1)
+        # A host name has no ':', so the address is everything after the first one
+        hostname, ip_addr = entry.split(":", 1)
         hostname = hostname.strip()
-        ip_addr = ip_addr.strip()
+        ip_addr = ip_addr.strip().removeprefix("[").removesuffix("]")
         if hostname and ip_addr:
             ip_to_hosts.setdefault(ip_addr, []).append(hostname)
 
