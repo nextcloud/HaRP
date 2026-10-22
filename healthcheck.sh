@@ -39,9 +39,11 @@ check_port () {
   local fulladdr
   # Strip quotes as start.sh does
   fulladdr="$(echo "$1" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
-  # If "host" is 0.0.0.0, netcat to 127.0.0.1. Otherwise, use the given host.
-  local host_part="$(echo "$fulladdr" | cut -d':' -f1)"
-  local port_part="$(echo "$fulladdr" | cut -d':' -f2)"
+  # The port follows the last ':'; an IPv6 host may be in brackets
+  local host_part="${fulladdr%:*}"
+  local port_part="${fulladdr##*:}"
+  host_part="${host_part#\[}"
+  host_part="${host_part%\]}"
 
   if [ -z "$host_part" ] || [ -z "$port_part" ]; then
     echo "WARN: Cannot parse $fulladdr"
@@ -50,6 +52,12 @@ check_port () {
 
   # If host_part is 0.0.0.0, override with 127.0.0.1
   [ "$host_part" = "0.0.0.0" ] && host_part="127.0.0.1"
+
+  # A [::] socket answers on ::1, or on 127.0.0.1 when the loopback has no IPv6
+  if [ "$host_part" = "::" ]; then
+    nc -z -w 2 ::1 "$port_part" 2>/dev/null && return 0
+    host_part="127.0.0.1"
+  fi
 
   if ! nc -z -w 2 "$host_part" "$port_part"; then
     echo "ERROR: Service not listening on $fulladdr"

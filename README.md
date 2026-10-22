@@ -272,6 +272,7 @@ HaRP is configured via several environment variables. Here are the key variables
     - `HP_EXAPPS_ADDRESS="0.0.0.0:8780"`
     - `HP_EXAPPS_HTTPS_ADDRESS="0.0.0.0:8781"`
   - **Note:** Must be reachable by your reverse proxy.
+  - **Note:** `0.0.0.0` listens on IPv4 only. On an IPv6-only cluster use `[::]:8780` and `[::]:8781`, which need a kernel with IPv6 support.
   - **Note:** The HTTPS frontend is enabled only when `/certs/cert.pem` (certificate and private key in one PEM file) exists.
 
 - **`HP_TRUSTED_PROXY_IPS`**
