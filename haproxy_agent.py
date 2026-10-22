@@ -98,7 +98,24 @@ logging.getLogger("aiohttp").setLevel(level=LOG_LEVEL)
 NC_REQ_URL = NC_INSTANCE_URL.removesuffix("/").removesuffix("/index.php")
 EX_APP_URL = f"{NC_REQ_URL}/index.php/apps/app_api/harp/exapp-meta"
 USER_INFO_URL = f"{NC_REQ_URL}/index.php/apps/app_api/harp/user-info"
-EXCLUDE_HEADERS_USER_INFO = {"host", "content-length"}
+# Client headers the user-info lookup leaves out, as it does every content-* header
+EXCLUDE_HEADERS_USER_INFO = {
+    "accept-encoding",
+    "connection",
+    "expect",
+    "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "range",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+# aiohttp refuses to send a header that contains one of these
+UNSENDABLE_HEADER_CHARS = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 
 # Keep total below the SPOE `timeout processing` (30s); aiohttp's default is 5 minutes.
 NC_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=25.0, connect=5.0)
@@ -1033,7 +1050,13 @@ async def _get_or_fetch_exapp(exapp_id: str) -> ExApp | None:
 
 
 async def nc_get_user(app_id: str, all_headers: dict[str, str]) -> NcUser | None:
-    ext_headers = {k: v for k, v in all_headers.items() if k.lower() not in EXCLUDE_HEADERS_USER_INFO}
+    ext_headers = {
+        k: v
+        for k, v in all_headers.items()
+        if k.lower() not in EXCLUDE_HEADERS_USER_INFO
+        and not k.lower().startswith("content-")
+        and not UNSENDABLE_HEADER_CHARS.search(k + v)
+    }
     log_headers("Requesting user info for ExApp '%s' with headers %s", ext_headers, app_id)
     async with _get_nc_session().get(
         USER_INFO_URL,
