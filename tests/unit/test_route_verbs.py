@@ -27,8 +27,11 @@ def exapp(*routes) -> agent.ExApp:
     )
 
 
-def decide(monkeypatch, record, method, path, level=None, lookups=None) -> dict:
-    """The txn vars the agent sets for this request; `level` sends credentials of a user with that access level."""
+def decide(monkeypatch, record, method, path, level=None, lookups=None, headers="") -> dict:
+    """The txn vars the agent sets for this request; `level` sends credentials of a user with that access level.
+
+    `method=None` calls the handler without it, as for a custom spoe-agent.conf without `method`.
+    """
 
     async def fetch(_app_id):
         return record
@@ -40,11 +43,12 @@ def decide(monkeypatch, record, method, path, level=None, lookups=None) -> dict:
 
     monkeypatch.setattr(agent, "_get_or_fetch_exapp", fetch)
     monkeypatch.setattr(agent, "nc_get_user", user)
-    headers = "authorization: Basic eDp5" if level is not None else ""
-    reply = agent.exapps_msg(  # the handler, called the way haproxyspoa calls it
-        path=f"/exapps/app{path}", headers=headers, client_ip=ipaddress.ip_address(IP), pass_cookie="", method=method
-    )
-    return txn_vars(asyncio.run(reply))
+    if level is not None:
+        headers = "authorization: Basic eDp5"
+    args = {"path": f"/exapps/app{path}", "headers": headers, "client_ip": ipaddress.ip_address(IP), "pass_cookie": ""}
+    if method is not None:
+        args["method"] = method
+    return txn_vars(asyncio.run(agent.exapps_msg(**args)))  # the handler, called the way haproxyspoa calls it
 
 
 def outcome(found: dict) -> str:
@@ -85,7 +89,8 @@ def test_bruteforce_protection_comes_from_the_deciding_route(monkeypatch):
 
 
 def test_unlisted_method_is_405_with_allow_and_no_ban_strike(monkeypatch):
-    found = decide(monkeypatch, exapp(*SAME_URL), "DELETE", "/x")
+    other_url = {"url": "^/other$", "verb": "PUT", "access_level": 0}  # not part of the Allow header of /x
+    found = decide(monkeypatch, exapp(*SAME_URL, other_url), "DELETE", "/x")
     assert found["method_not_allowed"] == 1
     assert found["not_found"] == 1  # a custom /haproxy.cfg without the 405 rule answers 404
     assert found["allow"] == "GET, HEAD, POST"
@@ -128,7 +133,7 @@ def test_verb_as_appapi_before_35_stores_it(monkeypatch):
     record = exapp({"url": "^/z$", "verb": "\n      get, POST\n    ", "access_level": 0})
     assert request(monkeypatch, record, "GET", "/z") == "ALLOW"
     assert request(monkeypatch, record, "POST", "/z") == "ALLOW"
-    assert request(monkeypatch, record, "PUT", "/z") == "405"
+    assert decide(monkeypatch, record, "PUT", "/z")["allow"] == "GET, HEAD, POST"
 
 
 def test_method_is_case_sensitive(monkeypatch):
@@ -148,8 +153,23 @@ def test_route_without_verb_matches_every_method(monkeypatch):
 
 def test_request_without_method_keeps_the_first_path_match(monkeypatch):
     # A custom spoe-agent.conf without `method`: the first route of the path decides, as before.
-    assert request(monkeypatch, exapp(*SAME_URL), "", "/x") == "ALLOW"
-    assert request(monkeypatch, exapp(*reversed(SAME_URL)), "", "/x") == "403"
+    assert request(monkeypatch, exapp(*SAME_URL), None, "/x") == "ALLOW"
+    assert request(monkeypatch, exapp(*reversed(SAME_URL)), None, "/x") == "403"
+
+
+def test_request_signed_by_appapi_skips_the_route_check(monkeypatch):
+    signed = "\n".join(
+        [
+            "harp-shared-key: unit-test-shared-key",
+            "authorization-app-api: dXNlcjpzZWNyZXQ=",
+            "ex-app-version: 1",
+            "ex-app-id: app",
+            "ex-app-host: 127.0.0.1",
+            "ex-app-port: 23000",
+        ]
+    )
+    assert outcome(decide(monkeypatch, exapp(*SAME_URL), "DELETE", "/x", headers=signed)) == "ALLOW"
+    assert outcome(decide(monkeypatch, exapp(*SAME_URL), "PUT", "/enabled", headers=signed)) == "ALLOW"
 
 
 def test_public_route_still_tells_the_exapp_who_the_user_is(monkeypatch):
