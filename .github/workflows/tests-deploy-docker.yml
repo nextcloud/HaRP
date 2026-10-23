@@ -549,6 +549,10 @@ jobs:
           test_req admin "-u usr:password" 403
           test_req admin "-u admin:admin" 200
 
+          # A method that no route of the path lists: HaRP answers 405 itself, with HEAD added to the GET route's verb
+          curl -sS -o /dev/null -D - -X POST http://127.0.0.1/exapps/app-skeleton-python/public | tr -d '\r' \
+            | grep -ix 'allow: GET, HEAD' >/dev/null || error
+
           # A chunked request with credentials, sent to HaRP directly because the nginx in front buffers bodies
           code=$(printf 'body' | curl -sS -m 10 -o /dev/null -w "%{http_code}" -u usr:password -X GET \
             -H "Transfer-Encoding: chunked" --data-binary @- http://127.0.0.1:8780/exapps/app-skeleton-python/user)

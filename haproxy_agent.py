@@ -342,6 +342,7 @@ class AccessLevel(IntEnum):
 
 class ExAppRoute(BaseModel):
     url: str = Field(..., description="REGEX for URL, e.g. r'^/private/.*'")
+    verb: str | None = Field(None, description="HTTP methods, e.g. 'GET,POST'. Older AppAPI versions do not send it.")
     access_level: AccessLevel = Field(..., description="ADMIN(2), USER(1), or PUBLIC(0)")
     bruteforce_protection: list[int] = Field(
         [], description="List with HTTP statuses to trigger the bruteforce protection."
@@ -354,6 +355,19 @@ class ExAppRoute(BaseModel):
     def encode_bruteforce_protection_values(self) -> Self:
         self.str_bruteforce_protection = json.dumps(self.bruteforce_protection) if self.bruteforce_protection else ""
         return self
+
+    def methods(self) -> frozenset[str] | None:
+        """The methods the route lists, or None (every method) when AppAPI did not send a verb."""
+        if self.verb is None:
+            return None
+        return frozenset(token.upper() for token in re.split(r"[\s,]+", self.verb) if token)
+
+    def accepts(self, method: str) -> bool:
+        """HEAD is accepted wherever GET is. Methods are case-sensitive: a backend may treat `get` as not GET."""
+        methods = self.methods()
+        if methods is None:
+            return True
+        return method in methods or (method == "HEAD" and "GET" in methods)
 
 
 class ExApp(BaseModel):
@@ -677,20 +691,57 @@ async def get_session(pass_cookie: str) -> NcUser | None:
 ###############################################################################
 
 
+def find_route(
+    routes: list[ExAppRoute], target_path: str, method: str, exapp_id: str
+) -> tuple[ExAppRoute | None, list[ExAppRoute]]:
+    """The first route matching both path and method, as in AppAPI's PHP proxy, or None and the routes of the path.
+
+    A request without a method (a custom spoe-agent.conf without `method`) gets the first route of the path.
+    """
+    path_routes = []
+    for route in routes:
+        try:
+            if not re.match(route.url, target_path):
+                continue
+        except re.error as err:
+            LOGGER.error("Invalid regex %s in route for exapp %s: %s", route.url, exapp_id, err)
+            continue
+        if not method or route.accepts(method):
+            return route, path_routes
+        path_routes.append(route)
+    return None, path_routes
+
+
+def allowed_methods(routes: list[ExAppRoute]) -> str:
+    """The `Allow` header of a 405: the methods of these routes, with HEAD wherever GET is."""
+    methods = set().union(*(route.methods() or frozenset() for route in routes))
+    if "GET" in methods:
+        methods.add("HEAD")
+    return ", ".join(sorted(methods))
+
+
 @SPOA_AGENT.handler("exapps_msg")
 async def exapps_msg(
-    path: str, headers: str, client_ip: ipaddress.IPv4Address | ipaddress.IPv6Address, pass_cookie: str
+    path: str,
+    headers: str,
+    client_ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    pass_cookie: str,
+    method: str = "",
 ) -> AckPayload:
     """An exception would kill the SPOA connection; a zero-action ACK hangs the stream until `timeout processing`."""
     try:
-        return await _exapps_msg(path, headers, client_ip, pass_cookie)
+        return await _exapps_msg(path, headers, client_ip, pass_cookie, method)
     except Exception:
         LOGGER.exception("Unhandled error while processing request to path=%s", path)
         return AckPayload().set_txn_var("agent_error", 1)
 
 
 async def _exapps_msg(
-    path: str, headers: str, client_ip: ipaddress.IPv4Address | ipaddress.IPv6Address, pass_cookie: str
+    path: str,
+    headers: str,
+    client_ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    pass_cookie: str,
+    method: str = "",
 ) -> AckPayload:
     reply = AckPayload()
     request_headers = parse_headers(headers)
@@ -783,6 +834,17 @@ async def _exapps_msg(
         await record_ip_failure(client_ip_str)
         return reply.set_txn_var("bad_request", 1)
     else:
+        route, path_routes = find_route(exapp_record.routes, target_path, method, exapp_id)
+        if route is None and path_routes:
+            # Not counted toward the IP ban: link checkers, monitors and CORS preflights send such requests. So it is
+            # decided before the user lookup, or random credentials would get checked by Nextcloud without limit.
+            # not_found is also set, so that a custom /haproxy.cfg without the 405 rule answers 404.
+            allow = allowed_methods(path_routes)
+            LOGGER.info("No route of %s allows %s %s; allowed: %s", exapp_id, method, target_path, allow)
+            reply = reply.set_txn_var("allow", allow)
+            reply = reply.set_txn_var("method_not_allowed", 1)
+            return reply.set_txn_var("not_found", 1)
+
         nc_user = None
         if pass_cookie or "authorization" in request_headers:
             # We also pass requests with "authorization" to the Nextcloud to support App Passwords and Basic Auth.
@@ -799,24 +861,14 @@ async def _exapps_msg(
                     LOGGER.exception("Failed to fetch user info from Nextcloud", exc_info=e)
                     return reply.set_txn_var("unauthorized", 1)
 
-        for route in exapp_record.routes:
-            try:
-                if re.match(route.url, target_path):
-                    if route.access_level == AccessLevel.PUBLIC:
-                        exapp_route_bruteforce_protection = route.str_bruteforce_protection
-                        route_allowed = True
-                        break
-
-                    if nc_user and route.access_level <= nc_user.access_level:
-                        exapp_route_bruteforce_protection = route.str_bruteforce_protection
-                        route_allowed = True
-                        break
-
-                    LOGGER.error("Access denied for '%s' to %s", nc_user.user_id if nc_user else "", target_path)
-                    await record_ip_failure(client_ip_str)
-                    return reply.set_txn_var("forbidden", 1)
-            except re.error as err:
-                LOGGER.error("Invalid regex %s in route for exapp %s: %s", route.url, exapp_id, err)
+        if route is not None:
+            if route.access_level == AccessLevel.PUBLIC or (nc_user and route.access_level <= nc_user.access_level):
+                exapp_route_bruteforce_protection = route.str_bruteforce_protection
+                route_allowed = True
+            else:
+                LOGGER.error("Access denied for '%s' to %s", nc_user.user_id if nc_user else "", target_path)
+                await record_ip_failure(client_ip_str)
+                return reply.set_txn_var("forbidden", 1)
 
     if not route_allowed:
         LOGGER.error("No defined route for handling %s", target_path)
