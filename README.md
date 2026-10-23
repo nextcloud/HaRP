@@ -717,7 +717,7 @@ image has to be present on every node that can run the pod.
 
     > **Note:** On Alpine Linux, `apk add frp` also installs the FRP client, but the Alpine package can be several releases behind the version above.
 
-5. List in the `<verb>` of each route in your `info.xml` every HTTP method that route serves. As in AppAPI's PHP proxy, the first route whose URL and verb both match a request decides its access level. Unlike the PHP proxy, HaRP allows `HEAD` wherever `GET` is listed. It answers a method that no route of the path lists with `405 Method Not Allowed`. If browsers send CORS preflight requests to your ExApp, list `OPTIONS` only in a `PUBLIC` route placed before the other routes of that path, as preflight requests carry no credentials.
+5. List in the `<verb>` of each route in your `info.xml` every HTTP method that route serves. As in AppAPI's PHP proxy, the first route whose URL and verb both match a request decides its access level. Unlike the PHP proxy, HaRP allows `HEAD` wherever `GET` is listed. It answers a method that no route of the path lists with `405 Method Not Allowed`.
 
 That's it! Your ExApp is now adapted to Nextcloud 32.
 
