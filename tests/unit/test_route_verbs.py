@@ -11,7 +11,7 @@ import haproxy_agent as agent
 
 IP = "192.0.2.7"
 
-BUG = [  # a public GET route listed before an admin POST route of the same URL
+SAME_URL = [  # a public GET route listed before an admin POST route of the same URL
     {"url": "^/x$", "verb": "GET", "access_level": 0},
     {"url": "^/x$", "verb": "POST", "access_level": 2},
 ]
@@ -65,10 +65,10 @@ def strikes():
 
 
 def test_first_match_by_path_and_method(monkeypatch):
-    assert request(monkeypatch, exapp(*BUG), "GET", "/x") == "ALLOW"
-    assert request(monkeypatch, exapp(*BUG), "POST", "/x") == "403"
+    assert request(monkeypatch, exapp(*SAME_URL), "GET", "/x") == "ALLOW"
+    assert request(monkeypatch, exapp(*SAME_URL), "POST", "/x") == "403"
     assert strikes() == 1
-    assert request(monkeypatch, exapp(*BUG), "POST", "/x", level=2) == "ALLOW"
+    assert request(monkeypatch, exapp(*SAME_URL), "POST", "/x", level=2) == "ALLOW"
 
 
 def test_bruteforce_protection_comes_from_the_deciding_route(monkeypatch):
@@ -85,34 +85,34 @@ def test_bruteforce_protection_comes_from_the_deciding_route(monkeypatch):
 
 
 def test_unlisted_method_is_405_with_allow_and_no_ban_strike(monkeypatch):
-    found = decide(monkeypatch, exapp(*BUG), "DELETE", "/x")
+    found = decide(monkeypatch, exapp(*SAME_URL), "DELETE", "/x")
     assert found["method_not_allowed"] == 1
     assert found["not_found"] == 1  # a custom /haproxy.cfg without the 405 rule answers 404
     assert found["allow"] == "GET, HEAD, POST"
     for _ in range(20):  # a link checker or monitor cannot get its address banned this way
-        assert request(monkeypatch, exapp(*BUG), "PATCH", "/x") == "405"
+        assert request(monkeypatch, exapp(*SAME_URL), "PATCH", "/x") == "405"
     assert strikes() == 0
-    assert request(monkeypatch, exapp(*BUG), "GET", "/x") == "ALLOW"
+    assert request(monkeypatch, exapp(*SAME_URL), "GET", "/x") == "ALLOW"
 
 
 def test_unlisted_method_is_refused_before_the_user_lookup(monkeypatch):
     # Not counted toward the ban, so it must not let a client make Nextcloud check credentials without limit.
     lookups = []
-    found = decide(monkeypatch, exapp(*BUG), "DELETE", "/x", level=1, lookups=lookups)
+    found = decide(monkeypatch, exapp(*SAME_URL), "DELETE", "/x", level=1, lookups=lookups)
     assert outcome(found) == "405"
     assert lookups == []
-    assert outcome(decide(monkeypatch, exapp(*BUG), "POST", "/x", level=2, lookups=lookups)) == "ALLOW"
+    assert outcome(decide(monkeypatch, exapp(*SAME_URL), "POST", "/x", level=2, lookups=lookups)) == "ALLOW"
     assert lookups == ["/x"]
 
 
 def test_head_is_implied_by_get(monkeypatch):
-    assert request(monkeypatch, exapp(*BUG), "HEAD", "/x") == "ALLOW"
+    assert request(monkeypatch, exapp(*SAME_URL), "HEAD", "/x") == "ALLOW"
     only_post = exapp({"url": "^/y$", "verb": "POST", "access_level": 0})
     assert request(monkeypatch, only_post, "HEAD", "/y") == "405"
 
 
 def test_options_is_not_special(monkeypatch):
-    assert request(monkeypatch, exapp(*BUG), "OPTIONS", "/x") == "405"
+    assert request(monkeypatch, exapp(*SAME_URL), "OPTIONS", "/x") == "405"
     listed = exapp({"url": "^/y$", "verb": "POST,OPTIONS", "access_level": 0})
     assert request(monkeypatch, listed, "OPTIONS", "/y") == "ALLOW"
 
@@ -123,8 +123,16 @@ def test_route_with_several_verbs(monkeypatch):
     assert request(monkeypatch, record, "PUT", "/z") == "405"
 
 
+def test_verb_as_appapi_before_35_stores_it(monkeypatch):
+    # AppAPI before 35 stores the text of <verb> as it is in info.xml, line breaks and case included.
+    record = exapp({"url": "^/z$", "verb": "\n      get, POST\n    ", "access_level": 0})
+    assert request(monkeypatch, record, "GET", "/z") == "ALLOW"
+    assert request(monkeypatch, record, "POST", "/z") == "ALLOW"
+    assert request(monkeypatch, record, "PUT", "/z") == "405"
+
+
 def test_method_is_case_sensitive(monkeypatch):
-    assert request(monkeypatch, exapp(*BUG), "get", "/x") == "405"
+    assert request(monkeypatch, exapp(*SAME_URL), "get", "/x") == "405"
 
 
 def test_methods_are_compared_as_tokens(monkeypatch):
@@ -140,17 +148,17 @@ def test_route_without_verb_matches_every_method(monkeypatch):
 
 def test_request_without_method_keeps_the_first_path_match(monkeypatch):
     # A custom spoe-agent.conf without `method`: the first route of the path decides, as before.
-    assert request(monkeypatch, exapp(*BUG), "", "/x") == "ALLOW"
-    assert request(monkeypatch, exapp(*reversed(BUG)), "", "/x") == "403"
+    assert request(monkeypatch, exapp(*SAME_URL), "", "/x") == "ALLOW"
+    assert request(monkeypatch, exapp(*reversed(SAME_URL)), "", "/x") == "403"
 
 
 def test_public_route_still_tells_the_exapp_who_the_user_is(monkeypatch):
-    found = decide(monkeypatch, exapp(*BUG), "GET", "/x", level=1)
+    found = decide(monkeypatch, exapp(*SAME_URL), "GET", "/x", level=1)
     assert found["exapp_token"] == agent.b64encode(b"u:t")
 
 
 def test_unknown_path_is_still_404_and_counted(monkeypatch):
-    assert request(monkeypatch, exapp(*BUG), "GET", "/nope") == "404"
+    assert request(monkeypatch, exapp(*SAME_URL), "GET", "/nope") == "404"
     assert strikes() == 1
 
 
