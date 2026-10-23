@@ -360,7 +360,7 @@ class ExAppRoute(BaseModel):
         """The methods the route lists, or None (every method) when AppAPI did not send a verb."""
         if self.verb is None:
             return None
-        return frozenset(token.upper() for token in re.findall(r"[A-Za-z][A-Za-z-]*", self.verb))
+        return frozenset(token.upper() for token in re.split(r"[\s,]+", self.verb) if token)
 
     def accepts(self, method: str) -> bool:
         """HEAD is accepted wherever GET is. Methods are case-sensitive: a backend may treat `get` as not GET."""
