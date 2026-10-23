@@ -339,7 +339,9 @@ def test_k8s_create_refuses_an_invalid_role_before_contacting_the_cluster(no_doc
     assert text.startswith("Payload validation error: role_suffix: ")
 
 
-def test_user_info_requests_keep_the_credentials_but_the_log_does_not(monkeypatch, caplog):
+@pytest.fixture
+def user_info_sent(monkeypatch) -> dict:
+    """Answer user-info lookups with the admin user; the returned dict gets the headers the lookup sent."""
     sent = {}
 
     class Response:
@@ -360,15 +362,57 @@ def test_user_info_requests_keep_the_credentials_but_the_log_does_not(monkeypatc
             return Response()
 
     monkeypatch.setattr(agent, "_get_nc_session", Session)
+    return sent
+
+
+def test_user_info_requests_keep_the_credentials_but_the_log_does_not(user_info_sent, caplog):
     headers = {"authorization": "Basic YWRtaW46YWRtaW4=", "cookie": "oc_sessionPassphrase=passphrase-value"}
     with caplog.at_level(logging.DEBUG, logger=agent.LOGGER.name):
         user = asyncio.run(agent.nc_get_user("app", headers))
     assert user.user_id == "admin"
-    assert sent["authorization"] == "Basic YWRtaW46YWRtaW4="  # Nextcloud still gets them
-    assert sent["cookie"] == "oc_sessionPassphrase=passphrase-value"
+    assert user_info_sent["authorization"] == "Basic YWRtaW46YWRtaW4="  # Nextcloud still gets them
+    assert user_info_sent["cookie"] == "oc_sessionPassphrase=passphrase-value"
     assert "Requesting user info for ExApp 'app'" in caplog.text
     assert "YWRtaW46YWRtaW4=" not in caplog.text
     assert "passphrase-value" not in caplog.text
+
+
+def test_user_info_requests_leave_out_the_client_headers_that_break_them(user_info_sent):
+    headers = agent.parse_headers(
+        "\n".join(
+            [
+                "Host: cloud.example.com",
+                "Authorization: Basic YWRtaW46YWRtaW4=",
+                "Cookie: oc_sessionPassphrase=passphrase-value",
+                "User-Agent: curl/8.22.0",
+                "X-Forwarded-For: 198.51.100.7",
+                "Transfer-Encoding: chunked",
+                "Expect: 100-continue",
+                "Content-Type: application/octet-stream",
+                "Connection: keep-alive, Upgrade",
+                "Keep-Alive: timeout=5",
+                "Upgrade: websocket",
+                "TE: trailers",
+                "Accept-Encoding: gzip, deflate, br, zstd",
+                "Proxy-Authorization: Basic cHJveHk6c2VjcmV0",
+                "Range: bytes=1000-",
+            ]
+        )
+    )
+    assert asyncio.run(agent.nc_get_user("app", headers)).user_id == "admin"
+    assert user_info_sent == {
+        "authorization": "Basic YWRtaW46YWRtaW4=",
+        "cookie": "oc_sessionPassphrase=passphrase-value",
+        "user-agent": "curl/8.22.0",
+        "x-forwarded-for": "198.51.100.7",
+        "harp-shared-key": KEY,
+    }
+
+
+def test_user_info_requests_leave_out_a_header_with_a_control_character(user_info_sent):
+    headers = {"authorization": "Basic YWRtaW46YWRtaW4=", "x-custom": "a\x01b"}
+    assert asyncio.run(agent.nc_get_user("app", headers)).user_id == "admin"
+    assert user_info_sent == {"authorization": "Basic YWRtaW46YWRtaW4=", "harp-shared-key": KEY}
 
 
 def test_create_refuses_a_read_write_system_mount_once_enforced(no_docker_engine, monkeypatch):
