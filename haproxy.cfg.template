@@ -47,6 +47,7 @@ frontend ex_apps
     http-request silent-drop if { var(txn.exapps.bad_request) -m int eq 1 }
     http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.exapps.unauthorized) -m int eq 1 }
     http-request return status 403 content-type text/plain string "403 Forbidden" if { var(txn.exapps.forbidden) -m int eq 1 }
+    http-request return status 405 content-type text/plain string "405 Method Not Allowed" hdr Allow "%[var(txn.exapps.allow)]" if { var(txn.exapps.method_not_allowed) -m int eq 1 }
     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
     http-request return status 503 content-type text/plain string "503 Service Unavailable (HaRP)" if !{ var(txn.exapps.backend) -m found }
     use_backend %[var(txn.exapps.backend)]
@@ -62,6 +63,7 @@ _HTTPS_FRONTEND_     filter spoe engine exapps-spoe config /etc/haproxy/spoe-age
 _HTTPS_FRONTEND_     http-request silent-drop if { var(txn.exapps.bad_request) -m int eq 1 }
 _HTTPS_FRONTEND_     http-request return status 401 content-type text/plain string "401 Unauthorized" if { var(txn.exapps.unauthorized) -m int eq 1 }
 _HTTPS_FRONTEND_     http-request return status 403 content-type text/plain string "403 Forbidden" if { var(txn.exapps.forbidden) -m int eq 1 }
+_HTTPS_FRONTEND_     http-request return status 405 content-type text/plain string "405 Method Not Allowed" hdr Allow "%[var(txn.exapps.allow)]" if { var(txn.exapps.method_not_allowed) -m int eq 1 }
 _HTTPS_FRONTEND_     http-request return status 404 content-type text/plain string "404 Not Found" if { var(txn.exapps.not_found) -m int eq 1 }
 _HTTPS_FRONTEND_     http-request return status 503 content-type text/plain string "503 Service Unavailable (HaRP)" if !{ var(txn.exapps.backend) -m found }
 _HTTPS_FRONTEND_     use_backend %[var(txn.exapps.backend)]
