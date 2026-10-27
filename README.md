@@ -165,7 +165,7 @@ Register HaRP as a deploy daemon in the AppAPI admin settings with the `HaRP Pro
   - When an allowed and a denied entry both cover a mount, the longer one decides, and denied wins a tie: `HP_EXAPP_BIND_MOUNTS_ALLOWED="/mnt/models,/var/run/mysqld"` permits `/var/run/mysqld/mysqld.sock` while `/var/run/docker.sock` stays refused. An allowed list restricts every other mount too, so list all the sources you mount; `HP_EXAPP_BIND_MOUNTS_DENIED="/"` with an allowed list permits nothing else.
   - A mount without a mode is read-write, so add `:ro` to mounts of system paths such as `/etc/localtime`. On Docker Desktop for Windows, host paths are below `/run`, so set `HP_EXAPP_BIND_MOUNTS_ALLOWED="/run/desktop/mnt/host"` there; the sockets of rootless Docker and Podman (`/run/user/<uid>/...`) are permitted with a warning.
   - Paths are normalized and compared as text; HaRP cannot see symbolic links on the Docker host, so set an allowed list for a strict rule. Entries and mounts must be absolute paths without a `..` segment, `:` or control characters, and HaRP does not start with a malformed entry.
-  - **Upgrading:** AppAPI sends the stored mounts of an ExApp again on every update, after it has removed the old container, so a refused mount leaves the ExApp without a container, and `occ app_api:app:update` does not retry because the new version is already stored. Rolling HaRP back does not repair it. Unregister the ExApp with `occ app_api:app:unregister <appid> --force` (its data is kept unless you add `--rm-data`) and register it again with its environment variables and corrected mounts, because unregistering deletes its deploy options. The [0.4.6 release notes](https://github.com/nextcloud/HaRP/releases/tag/v0.4.6) list what changed.
+  - **Upgrading:** AppAPI sends the stored mounts of an ExApp again on every update, after it has removed the old container, so a refused mount leaves the ExApp without a container, and `occ app_api:app:update` does not retry because the new version is already stored. Rolling HaRP back does not repair it. Unregister the ExApp with `occ app_api:app:unregister <appid> --force` (its data is kept unless you add `--rm-data`) and register it again with its environment variables and corrected mounts, because unregistering deletes its deploy options. Before upgrading from 0.4.5 or older, check the mounts of your ExApps (shown in their deploy options) against these rules; the [0.4.6 release notes](https://github.com/nextcloud/HaRP/releases/tag/v0.4.6) list what changed.
 
 - **`HP_LOG_LEVEL`**: `debug`, `info`, `warning` or `error`. Default `warning`. Case, blanks and quotes do not matter, `warn` means `warning`, and any other value falls back to `warning`.
 
@@ -179,7 +179,7 @@ Register HaRP as a deploy daemon in the AppAPI admin settings with the `HaRP Pro
 
 - **Timeouts:**
   - `HP_TIMEOUT_CONNECT`: for establishing a connection. Default `30s`.
-  - `HP_TIMEOUT_CLIENT`: inactivity while HaRP waits for the client's request. Default `30s`; raising it weakens the protection against slow clients.
+  - `HP_TIMEOUT_CLIENT`: inactivity while HaRP waits for the client's request, not of a streaming response. Default `30s`; raising it weakens the protection against slow clients.
   - `HP_TIMEOUT_SERVER`: inactivity of the connection to the ExApp, also of an established streaming response (SSE). Default `1800s`; changing it is not recommended.
   - `HP_TIMEOUT_TUNNEL`: inactivity of upgraded connections (WebSockets). Default: the value of `HP_TIMEOUT_SERVER`. `0` means unlimited (HAProxy's maximum of `24d`) while the connection is open in both directions; half-closed connections are closed after 30 seconds.
 
@@ -239,7 +239,7 @@ For a Docker Engine on another host, or to avoid mounting the socket, connect th
        command: -c=/etc/frpc.toml
    ```
 
-The FRP connection can pass through your reverse proxy as well, for example with an nginx `stream` block:
+The FRP connection can pass through your reverse proxy as well, for example with an nginx `stream` block. On HaRP's own host, which publishes 8782 already, listen on another port and use it as `serverPort` in `frpc.toml`:
 
 ```nginx
 stream {
@@ -359,7 +359,7 @@ ExApp pods run under the `default` service account of `HP_K8S_NAMESPACE`. Leave 
 
 ## Adapting ExApps to use HaRP
 
-The developer manual describes how to [adapt an ExApp to HaRP](https://docs.nextcloud.com/server/latest/developer_manual/exapp_development/development_overview/ExAppHarpIntegration.html): the `start.sh` entrypoint from `exapps_dev` and the FRP client in the image. DSP is deprecated and will be removed in Nextcloud 35; an ExApp with HaRP support still works with DSP, so one release serves both. For the routes in your `info.xml`:
+The developer manual describes how to [adapt an ExApp to HaRP](https://docs.nextcloud.com/server/latest/developer_manual/exapp_development/development_overview/ExAppHarpIntegration.html): the `start.sh` entrypoint from `exapps_dev` and the FRP client in the image, version 0.71.1 like HaRP's FRP server, checked against the checksums of its release. DSP is deprecated and will be removed in Nextcloud 35; an ExApp with HaRP support still works with DSP, so one release serves both. For the routes in your `info.xml`:
 
 1. List in the `<verb>` of each route every HTTP method it serves, e.g. `GET,POST`. The first route whose URL and verb match a request decides its access level, `HEAD` is allowed wherever `GET` is, and a method that no route of the path lists gets `405 Method Not Allowed`. HaRP 0.4.7 and older, and HaRP with an AppAPI that does not send the verbs, match by URL only, so use different URLs where methods need different access levels.
 
@@ -414,10 +414,10 @@ To run the agent on the host, with only HAProxy in the container:
 curl -fsS \
   -H "harp-shared-key: <HP_SHARED_KEY>" \
   -H "docker-engine-port: 24000" \
-  http://127.0.0.1:8780/exapps/app_api/v1.41/_ping
+  http://127.0.0.1:8780/exapps/app_api/_ping
 ```
 
-`24000` is the bundled Docker Engine (with `/var/run/docker.sock` mounted); for a remote engine use its `remotePort`. Use `https://...:8781` for the HTTPS frontend. The answers:
+`24000` is the bundled Docker Engine (with `/var/run/docker.sock` mounted); for a remote engine use its `remotePort`. Use `https://...:8781` for the HTTPS frontend, with port 8781 published. The answers:
 
 * `OK`: HaRP reaches the Docker Engine.
 * `401 Unauthorized`: the `harp-shared-key` header does not match `HP_SHARED_KEY`.
@@ -432,7 +432,7 @@ Inside the HaRP container (`docker exec -it appapi-harp sh`), `curl -fsS --unix-
 Through the public URL, the same request without the key should get `401`, which shows that the reverse proxy forwards `/exapps/` to HaRP:
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code}\n' https://cloud.example.com/exapps/app_api/v1.41/_ping
+curl -sS -o /dev/null -w '%{http_code}\n' https://cloud.example.com/exapps/app_api/_ping
 ```
 
 Run it only once. Every `401` counts as a failed attempt of the address HaRP sees: yours if `HP_TRUSTED_PROXY_IPS` lists the proxy, otherwise the proxy's, often Nextcloud's on a single host. After 10 within 5 minutes HaRP drops every request from that address.
