@@ -22,7 +22,7 @@ from base64 import b64encode
 from enum import IntEnum
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from typing import Any, Literal, Self
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import aiohttp
 from aiohttp import web
@@ -43,9 +43,17 @@ from pydantic import (
 HARP_VERSION = "0.4.7"
 
 APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
-# Matches `..` path segments in any literal/encoded form: separators can be `/` or %2F,
-# the dots themselves can be `.` or %2E (any case combination, e.g. `..`, `%2e.`, `%2E%2e`).
-DOT_DOT_SEGMENT_PATTERN = re.compile(r"(?:^|/|%2[fF])(?:\.|%2[eE]){2}(?:/|%2[fF]|$)")
+# Matches `.` and `..` path segments in any literal/encoded form: separators can be `/`, %2F or `\` (a slash for WHATWG
+# URL parsers), the dots `.` or %2E (any case), and the segment may go on with `;` or %3B (Tomcat drops parameters),
+# or end at %3F or %23 (a wrapper ExApp that decodes the path cuts it there), as in AppAPI's PHP proxy.
+DOT_SEGMENT_PATTERN = re.compile(r"(?:^|[/\\]|%2[fF])(?:\.|%2[eE]){1,2}(?:[/;\\]|%2[fF]|%3[bBfF]|%23|$)")
+# An escaped RFC 3986 unreserved character (letters, digits, `-._~`): it means the same escaped or not.
+UNRESERVED_ESCAPE_PATTERN = re.compile(r"%(?:[46][1-9A-Fa-f]|[57][0-9Aa]|3[0-9]|2[DdEe]|5[Ff]|7[Ee])")
+LONE_PERCENT_PATTERN = re.compile(r"%(?![0-9A-Fa-f]{2})")
+# The reply to HAProxy carries the forwarded path and must fit one SPOE frame (16380 bytes).
+MAX_FORWARDED_PATH_LENGTH = 14 * 1024
+CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
+LIFECYCLE_ENDPOINTS = ("heartbeat", "init", "enabled")
 SHARED_KEY = os.environ.get("HP_SHARED_KEY")
 # ExApp containers get this token instead of the shared key (see `with_exapp_frp_token`). It is accepted only for
 # the FRP login, so an ExApp cannot use the control API. Deployed containers carry it: the derivation must not change.
@@ -691,8 +699,37 @@ async def get_session(pass_cookie: str) -> NcUser | None:
 ###############################################################################
 
 
-def find_route(
-    routes: list[ExAppRoute], target_path: str, method: str, exapp_id: str
+def _unescaped(match: re.Match) -> str:
+    return chr(int(match[0][1:], 16))
+
+
+def exapp_paths(target_path: str) -> tuple[str, list[str]]:
+    """The path to forward to the ExApp, and the ways servers read it, starting with the path its routes are checked on.
+
+    Servers differ on escaped unreserved characters, a `%` that starts no escape, repeated slashes and a raw backslash
+    (a slash for WHATWG URL parsers), so the forwarded path has none of them. The checked path is the forwarded one
+    decoded once, with `%2F` as a slash, and `//` merged, as for servers that decode before they route.
+    """
+    forwarded = UNRESERVED_ESCAPE_PATTERN.sub(_unescaped, LONE_PERCENT_PATTERN.sub("%25", target_path))
+    forwarded = re.sub("//+", "/", forwarded.replace("\\", "%5C"))
+    if len(forwarded) > MAX_FORWARDED_PATH_LENGTH:
+        return forwarded, [forwarded]  # refused by the caller
+    decoded = unquote(forwarded)
+    checked = re.sub("//+", "/", decoded)
+    readings = [checked, decoded]  # Starlette keeps the `//` of a decoded `%2F` next to a `/`
+    if "%2F" in forwarded or "%2f" in forwarded:
+        readings.append(unquote(re.sub("%2[fF]", "%252F", forwarded)))  # Express, aiohttp and Go keep it in its segment
+    if ";" in forwarded:
+        readings.append(re.sub("//+", "/", unquote(re.sub(";[^/]*", "", forwarded))))  # Tomcat drops `;` parameters
+    if "?" in checked or "#" in checked or ";" in checked:
+        resent = re.split("[?#]", checked, maxsplit=1)[0]  # a wrapper ExApp re-sending the decoded path cuts it there
+        readings += [resent, re.sub("//+", "/", re.sub(";[^/]*", "", resent))]  # Tomcat behind it drops `;` parameters
+    readings += [reading[:-1] for reading in readings if len(reading) > 1 and reading.endswith("/")]  # Express, Spring
+    return forwarded, list(dict.fromkeys(readings))
+
+
+def first_route(
+    routes: list[ExAppRoute], path: str, flags: int, method: str, exapp_id: str
 ) -> tuple[ExAppRoute | None, list[ExAppRoute]]:
     """The first route matching both path and method, as in AppAPI's PHP proxy, or None and the routes of the path.
 
@@ -701,7 +738,7 @@ def find_route(
     path_routes = []
     for route in routes:
         try:
-            if not re.match(route.url, target_path):
+            if not re.match(route.url, path, flags):
                 continue
         except re.error as err:
             LOGGER.error("Invalid regex %s in route for exapp %s: %s", route.url, exapp_id, err)
@@ -710,6 +747,25 @@ def find_route(
             return route, path_routes
         path_routes.append(route)
     return None, path_routes
+
+
+def find_route(
+    routes: list[ExAppRoute], readings: list[str], method: str, exapp_id: str
+) -> tuple[ExAppRoute | None, list[ExAppRoute]]:
+    """The route that decides the request: the first one matching the checked path, case-sensitively, and the method.
+
+    A route that another reading of the path (`exapp_paths`, the checked path first) or the path in another letter case
+    (Express, AppAPI's PHP proxy) matches can only raise the access level.
+    """
+    route, path_routes = first_route(routes, readings[0], 0, method, exapp_id)
+    if route is None:
+        return None, path_routes
+    for reading in readings:
+        for flags in (0, re.IGNORECASE) if reading != readings[0] else (re.IGNORECASE,):
+            other, _ = first_route(routes, reading, flags, method, exapp_id)
+            if other is not None and other.access_level > route.access_level:
+                route = other
+    return route, path_routes
 
 
 def allowed_methods(routes: list[ExAppRoute]) -> str:
@@ -754,8 +810,8 @@ async def _exapps_msg(
         LOGGER.warning("IP %s is banned due to excessive failed attempts.", client_ip_str)
         return reply.set_txn_var("bad_request", 1)
 
-    if DOT_DOT_SEGMENT_PATTERN.search(path):
-        LOGGER.warning("Rejecting path with parent-directory segment: %s (client_ip=%s)", path, client_ip_str)
+    if DOT_SEGMENT_PATTERN.search(path):
+        LOGGER.warning("Rejecting path with a dot segment: %s (client_ip=%s)", path, client_ip_str)
         await record_failure_unless_trusted(client_ip_str, request_headers)
         return reply.set_txn_var("bad_request", 1)
 
@@ -767,10 +823,10 @@ async def _exapps_msg(
     exapp_id = match.group(1)
     exapp_id_lower = exapp_id.lower()
     target_path = path.removeprefix(f"/exapps/{exapp_id}")
-    reply = reply.set_txn_var("target_path", target_path)
 
     # Special handling for AppAPI requests
     if exapp_id == "app_api":
+        reply = reply.set_txn_var("target_path", target_path)
         return await handle_app_api_request(target_path, request_headers, client_ip_str, reply)
 
     exapp_route_bruteforce_protection = None
@@ -829,12 +885,20 @@ async def _exapps_msg(
     route_allowed = False
     if authorization_app_api:
         route_allowed = True  # We skip routes checking for AppAPI signed requests
-    elif target_path in ("/heartbeat", "/init", "/enabled"):
-        LOGGER.error("Only requests from AppAPI allowed to the internal endpoints.")
-        await record_ip_failure(client_ip_str)
-        return reply.set_txn_var("bad_request", 1)
     else:
-        route, path_routes = find_route(exapp_record.routes, target_path, method, exapp_id)
+        target_path, readings = exapp_paths(target_path)
+        # Control characters too: Starlette's `$` also matches before a trailing newline (`/enabled%0A`).
+        if (
+            len(target_path) > MAX_FORWARDED_PATH_LENGTH
+            or CONTROL_CHARACTER_PATTERN.search(readings[0])
+            or any(reading.strip("/").lower() in LIFECYCLE_ENDPOINTS for reading in readings)
+        ):
+            LOGGER.error(
+                "Refusing a request to an internal endpoint, with a control character or too long: %.200s", target_path
+            )
+            await record_ip_failure(client_ip_str)
+            return reply.set_txn_var("bad_request", 1)
+        route, path_routes = find_route(exapp_record.routes, readings, method, exapp_id)
         if route is None and path_routes:
             # Not counted toward the IP ban: link checkers, monitors and CORS preflights send such requests. So it is
             # decided before the user lookup, or random credentials would get checked by Nextcloud without limit.
@@ -896,6 +960,7 @@ async def _exapps_msg(
             return reply.set_txn_var("not_found", 1)
 
     LOGGER.info("Rerouting request to %s:%s with path=%s", exapp_record.resolved_host, exapp_record.port, target_path)
+    reply = reply.set_txn_var("target_path", target_path)
     reply = reply.set_txn_var("target_ip", exapp_record.resolved_host)
     reply = reply.set_txn_var("target_port", exapp_record.port)
     reply = reply.set_txn_var("exapp_token", authorization_app_api)
