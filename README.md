@@ -370,7 +370,7 @@ The developer manual describes how to [adapt an ExApp to HaRP](https://docs.next
 If you've upgraded to Nextcloud 32 and want to switch from using DSP to HaRP, follow these steps:
 
 1. **Install HaRP** on the same Docker Engine that you were using for DSP.
-2. **Test Deployment on HaRP** with usual `TestDeploy` button.
+2. **Test Deployment on HaRP** with "Test deploy" in the menu of the daemon.
 3. **Set HaRP as the default deployment daemon** for ExApps.
 4. **Remove the ExApps without deleting their data volumes**:
    - **Terminal**: Do not use the `--rm-data` option when removing the app.
