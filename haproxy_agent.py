@@ -40,7 +40,7 @@ from pydantic import (
 # Reported by `/info`; AppAPI compares it against its minimum supported HaRP version.
 # Keep it in sync with the release tag and use a full `x.y.z` string: a bare float like `0.4`
 # is read as "0.4.0", which made every release look older than it is.
-HARP_VERSION = "0.4.7"
+HARP_VERSION = "0.4.8"
 
 APPID_PATTERN = re.compile(r"(?:^|/)exapps/([^/]+)")
 # Matches `.` and `..` path segments in any literal/encoded form: separators can be `/`, %2F or `\` (a slash for WHATWG
