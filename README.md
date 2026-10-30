@@ -361,17 +361,22 @@ ExApp pods run under the `default` service account of `HP_K8S_NAMESPACE`. Leave 
 
 The developer manual describes how to [adapt an ExApp to HaRP](https://docs.nextcloud.com/server/latest/developer_manual/exapp_development/development_overview/ExAppHarpIntegration.html): the `start.sh` entrypoint from `exapps_dev` and the FRP client in the image, version 0.71.1 like HaRP's FRP server, checked against the checksums of its release. DSP is deprecated and will be removed in Nextcloud 35; an ExApp with HaRP support still works with DSP, so one release serves both. For the routes in your `info.xml`:
 
-1. List in the `<verb>` of each route every HTTP method it serves, e.g. `GET,POST`. The first route whose URL and verb match a request decides its access level, `HEAD` is allowed wherever `GET` is, and a method that no route of the path lists gets `405 Method Not Allowed`. HaRP 0.4.7 and older, and HaRP with an AppAPI that does not send the verbs, match by URL only, so use different URLs where methods need different access levels.
+1. List in the `<verb>` of each route every HTTP method it serves, e.g. `GET,POST`. The first route whose URL and verb match a request decides its access level, `HEAD` is allowed wherever `GET` is, and a method that no route of the path lists gets `405 Method Not Allowed`. HaRP 0.4.7 and older, and HaRP with an AppAPI that does not send the verbs (AppAPI sends them from Nextcloud 33.0.11, 34.0.6 and 35.0.3), match by URL only, so use different URLs where methods need different access levels.
 
 2. Write the URLs of your routes for the decoded path, as your ExApp reads it, and start them with `/` or `^/`. Write a route for a directory as `^/img(/.*)?$`, so that `/img` and `/img/` keep its level. Where servers read a path differently (letter case, a trailing slash, `//`, `;` parameters, an escaped `/`, `?` or `#`), the highest access level among those readings applies. HaRP forwards a user's request with `//` merged and escaped letters, digits and `-._~` decoded. Paths with `.` or `..` segments are refused. Paths with control characters, and the `/heartbeat`, `/init` and `/enabled` endpoints, are refused unless AppAPI sends the request. HaRP 0.4.7 and older check routes on the path as sent.
 
 ## Nextcloud 32: Migrating Existing ExApps from DSP to HaRP
 
-1. Install HaRP on the Docker Engine that DSP uses, and check it with "Test deploy".
-2. Set HaRP as the default deploy daemon.
-3. Remove the ExApps but keep their data: no `--rm-data` in the terminal, no "Delete data when removing" in the web interface.
-4. Install the ExApps again; they are now deployed through HaRP.
-5. Remove DSP.
+If you've upgraded to Nextcloud 32 and want to switch from using DSP to HaRP, follow these steps:
+
+1. **Install HaRP** on the same Docker Engine that you were using for DSP.
+2. **Test Deployment on HaRP** with "Test deploy" in the menu of the daemon.
+3. **Set HaRP as the default deployment daemon** for ExApps.
+4. **Remove the ExApps without deleting their data volumes**:
+   - **Terminal**: Do not use the `--rm-data` option when removing the app.
+   - **From UI**: Do not use the "Delete data when removing" checkbox.
+5. **Install the ExApp**: Install removed ExApps, now they will be installed on `HaRP`.
+6. **Remove DSP**: Now DSP (Docker Socket Proxy) can be safely removed.
 
 ## Building & Deploying HaRP from Source
 
@@ -384,6 +389,7 @@ docker run \
   -e HP_SHARED_KEY="some_very_secure_password" \
   -e NC_INSTANCE_URL="http://nextcloud.local" \
   -e HP_LOG_LEVEL="debug" \
+  -e HP_VERBOSE_START="1" \
   -e HP_TRUSTED_PROXY_IPS="192.168.0.0/16" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v `pwd`/certs:/certs \
