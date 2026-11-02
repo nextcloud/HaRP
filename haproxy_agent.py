@@ -25,7 +25,7 @@ from typing import Any, Literal, Self
 from urllib.parse import quote, unquote
 
 import aiohttp
-from aiohttp import web
+from aiohttp import web, web_log
 from haproxyspoa.payloads.ack import AckPayload
 from haproxyspoa.spoa_server import SpoaServer
 from pydantic import (
@@ -3872,6 +3872,18 @@ async def require_shared_key(request: web.Request, handler):
     return await handler(request)
 
 
+class AccessLogger(web_log.AccessLogger):
+    """Logs /heartbeat pings only when HP_LOG_LEVEL=DEBUG or error responses
+
+    heartbeat.sh and the start.sh watchdog poll this often and lead to a spam of logs
+    """
+
+    def log(self, request: web.BaseRequest, response: web.StreamResponse, time: float):
+        if request.path == "/heartbeat" and response.status < 400 and not self.logger.isEnabledFor(logging.DEBUG):
+            return
+        super().log(request, response, time)
+
+
 def create_web_app() -> web.Application:
     app = web.Application(middlewares=[require_shared_key])
 
@@ -3911,7 +3923,7 @@ def create_web_app() -> web.Application:
 
 async def run_http_server(host="127.0.0.1", port=8200):
     app = create_web_app()
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log_class=AccessLogger)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     LOGGER.info("HTTP server listening at %s:%s", host, port)
