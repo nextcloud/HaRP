@@ -57,7 +57,7 @@ server {
     listen 80;
     server_name nextcloud.com;
 
-    location /exapps/ {
+    location ^~ /exapps/ {
         proxy_pass http://127.0.0.1:8780/exapps/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -71,7 +71,7 @@ server {
 }
 ```
 
-`proxy_http_version` and the `Upgrade` and `Connection` headers let WebSocket connections through to ExApps.
+Put the location directly in the `server` block of your Nextcloud: `^~` keeps its regular expression locations, such as those for `.js`, `.css` and `.php`, from answering `/exapps/` requests. `proxy_http_version` and the `Upgrade` and `Connection` headers let WebSocket connections through to ExApps.
 
 nginx resolves a name in `proxy_pass` (such as the container `appapi-harp` on a user-defined Docker network) only at startup, and does not start while that name cannot be resolved. To resolve it per request, add these lines to the `server` block above and change its `proxy_pass` to `proxy_pass $harp_upstream;`:
 
@@ -121,10 +121,12 @@ http:
 In the virtual host of your Nextcloud, before the existing configuration:
 
 ```apache
-ProxyPass /exapps/ http://127.0.0.1:8780/exapps/
+ProxyPass /exapps/ http://127.0.0.1:8780/exapps/ upgrade=websocket
 ProxyPassReverse /exapps/ http://127.0.0.1:8780/exapps/
 ProxyTimeout 1800
 ```
+
+`upgrade=websocket` (Apache 2.4.47 and newer) lets WebSocket connections through to ExApps.
 
 ### Cloudflare Tunnel
 
