@@ -447,7 +447,7 @@ def test_create_permits_a_staged_mount_and_sends_the_normalized_mounts_to_the_en
 
     class Response:
         def __init__(self, status, body=None):
-            self.status, self.body = status, body or {}
+            self.status, self.body, self.headers = status, body or {}, {}
 
         async def json(self):
             return self.body
