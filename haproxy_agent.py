@@ -1638,6 +1638,8 @@ async def docker_exapp_create(request: web.Request):
         LOGGER.debug("Checking/Creating volume '%s' via Docker API", volume_name)
         try:
             async with session.get(inspect_volume_url) as resp_inspect:
+                # Podman, unlike Docker, sends its version with every answer.
+                podman_version = resp_inspect.headers.get("Libpod-Api-Version")
                 if resp_inspect.status == 200:
                     LOGGER.info("Volume '%s' already exists.", volume_name)
                 elif resp_inspect.status == 404:
@@ -1677,6 +1679,27 @@ async def docker_exapp_create(request: web.Request):
         except Exception as e:
             LOGGER.exception("Unexpected error during volume management for '%s'", volume_name)
             raise web.HTTPInternalServerError(text="Unexpected error during volume management.") from e
+
+        # Podman ignores the "nvidia" driver; from version 5.4 it takes the GPUs as CDI devices.
+        if payload.compute_device == "cuda" and podman_version is not None:
+            version = re.match(r"(\d+)\.(\d+)", podman_version)
+            if version and (int(version[1]), int(version[2])) >= (5, 4):
+                LOGGER.info("Requesting the GPUs of '%s' from Podman as CDI devices.", container_name)
+                container_config["HostConfig"]["DeviceRequests"] = [
+                    {"Driver": "cdi", "DeviceIDs": ["nvidia.com/gpu=all"]}
+                ]
+                # AppAPI's NVIDIA_* variables are for the NVIDIA runtime hook, which can conflict with the CDI devices.
+                container_config["Env"] = [
+                    entry
+                    for entry in container_config["Env"]
+                    if not entry.startswith(("NVIDIA_VISIBLE_DEVICES=", "NVIDIA_DRIVER_CAPABILITIES="))
+                ]
+            else:
+                LOGGER.warning(
+                    "Podman %r ignores the GPU request for '%s': GPUs need Podman 5.4 or later.",
+                    podman_version[:32],
+                    container_name,
+                )
 
         create_container_url = f"http://{DOCKER_API_HOST}:{docker_engine_port}/containers/create?name={container_name}"
         LOGGER.debug(

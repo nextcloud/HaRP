@@ -187,6 +187,8 @@ Register HaRP as a deploy daemon in the AppAPI admin settings with the `HaRP Pro
 
 ## Connecting Docker Engines
 
+On a Podman engine, HaRP requests the GPUs of ExApps on a CUDA daemon as the CDI device `nvidia.com/gpu=all`. This needs Podman 5.4 or later and the NVIDIA CDI specification on the host (`nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`); without the specification the ExApp container does not start.
+
 ### Local Docker Engine
 
 Mount the Docker socket into the HaRP container: `-v /var/run/docker.sock:/var/run/docker.sock`.
