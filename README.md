@@ -361,24 +361,28 @@ ExApp pods run under the `default` service account of `HP_K8S_NAMESPACE`. Leave 
 
 ## Adapting ExApps to use HaRP
 
-The developer manual describes how to [adapt an ExApp to HaRP](https://docs.nextcloud.com/server/latest/developer_manual/exapp_development/development_overview/ExAppHarpIntegration.html): the `start.sh` entrypoint from `exapps_dev` and the FRP client in the image, version 0.71.1 like HaRP's FRP server, checked against the checksums of its release. DSP is deprecated and will be removed in Nextcloud 35; an ExApp with HaRP support still works with DSP, so one release serves both. For the routes in your `info.xml`:
+The developer manual describes how to [adapt an ExApp to HaRP](https://docs.nextcloud.com/server/latest/developer_manual/exapp_development/development_overview/ExAppHarpIntegration.html): the `start.sh` entrypoint from `exapps_dev` and the FRP client in the image, version 0.71.1 like HaRP's FRP server, checked against the checksums of its release. Nextcloud 36 no longer deploys ExApps with DSP; on Nextcloud 35 and older an ExApp with HaRP support also works with DSP, so one release serves both. For the routes in your `info.xml`:
 
 1. List in the `<verb>` of each route every HTTP method it serves, e.g. `GET,POST`. The first route whose URL and verb match a request decides its access level, `HEAD` is allowed wherever `GET` is, and a method that no route of the path lists gets `405 Method Not Allowed`. HaRP 0.4.7 and older, and HaRP with an AppAPI that does not send the verbs (AppAPI sends them from Nextcloud 33.0.11, 34.0.6 and 35.0.3), match by URL only, so use different URLs where methods need different access levels.
 
 2. Write the URLs of your routes for the decoded path, as your ExApp reads it, and start them with `/` or `^/`. Write a route for a directory as `^/img(/.*)?$`, so that `/img` and `/img/` keep its level. Where servers read a path differently (letter case, a trailing slash, `//`, `;` parameters, an escaped `/`, `?` or `#`), the highest access level among those readings applies. HaRP forwards a user's request with `//` merged and escaped letters, digits and `-._~` decoded. Paths with `.` or `..` segments are refused. Paths with control characters, and the `/heartbeat`, `/init` and `/enabled` endpoints, are refused unless AppAPI sends the request. HaRP 0.4.7 and older check routes on the path as sent.
 
-## Nextcloud 32: Migrating Existing ExApps from DSP to HaRP
+<a id="nextcloud-32-migrating-existing-exapps-from-dsp-to-harp"></a>
 
-If you've upgraded to Nextcloud 32 and want to switch from using DSP to HaRP, follow these steps:
+## Migrating ExApps from Docker Socket Proxy to HaRP
 
-1. **Install HaRP** on the same Docker Engine that you were using for DSP.
-2. **Test Deployment on HaRP** with "Test deploy" in the menu of the daemon.
-3. **Set HaRP as the default deployment daemon** for ExApps.
-4. **Remove the ExApps without deleting their data volumes**:
-   - **Terminal**: Do not use the `--rm-data` option when removing the app.
-   - **From UI**: Do not use the "Delete data when removing" checkbox.
-5. **Install the ExApp**: Install removed ExApps, now they will be installed on `HaRP`.
-6. **Remove DSP**: Now DSP (Docker Socket Proxy) can be safely removed.
+Nextcloud 36 no longer manages Docker daemons without HaRP: Docker Socket Proxy (DSP) daemons, such as AIO's `docker_aio`, and daemons on a Docker socket such as `/var/run/docker.sock`. Their ExApps keep running, but installing, updating and "Test deploy" are refused, removing an ExApp keeps its container and data volume, and the daemons can only be removed. To move ExApps from such a daemon to HaRP (Nextcloud 32 and later):
+
+1. **Install HaRP** for the Docker Engine of the old daemon, on that host or with the engine connected over FRP (see [Connecting Docker Engines](#connecting-docker-engines)); the data volumes are reused only on the same engine.
+2. **Register and test HaRP** as a deploy daemon (see [Nextcloud Configuration](#nextcloud-configuration)).
+3. **Set HaRP as the default deploy daemon.**
+4. **Remove each ExApp, keeping its data**: note its deploy options (`--env`, `--mount`; `docker inspect nc_app_<appid>` shows them), which removing deletes, then run `occ app_api:app:unregister <appid>` without `--rm-data`.
+5. **Install each ExApp again** with those deploy options: `occ app_api:app:register <appid> --env ... --mount ...` (the app store offers deploy options only on Nextcloud 32 and 33). HaRP replaces the `nc_app_<appid>` container and reuses the `nc_app_<appid>_data` volume. HaRP checks bind mounts against its rules (`HP_EXAPP_BIND_MOUNTS_*` in [Environment Variables](#environment-variables)), so a mount that the old daemon accepted can be refused.
+6. **Remove the old daemon** in the AppAPI admin settings, then the DSP container, if there is one (`nextcloud-appapi-dsp` by default). On Nextcloud 36, an ExApp that was not installed again keeps its old container running and its `nc_app_<appid>_data` volume; remove them with `docker rm -f nc_app_<appid>` and `docker volume rm nc_app_<appid>_data`.
+
+> **Note:** On Nextcloud 32 to 35, removing the old daemon in the admin settings also removes the ExApps still on it, with their containers and data volumes, so move them first.
+
+> **Note:** On AIO, enable the HaRP container in the AIO interface in step 1 and disable the Docker Socket Proxy container in step 6. If the daemon list has no `harp_aio` daemon, register one in step 2 with the "HaRP All-in-One" template and the `HP_SHARED_KEY` of the `nextcloud-aio-harp` container (`docker inspect nextcloud-aio-harp`).
 
 ## Building & Deploying HaRP from Source
 
